@@ -1,0 +1,56 @@
+# Changelog
+
+## Unreleased
+
+- Added a reproducible private Fedora x86_64 RPM build with a vendored tested runtime, local face models, desktop entry, application icon, and system launcher.
+- Removed hidden Batch lead-in/out padding, added 200 ms local entrance/exit refinement, and merged overlapping automatic ranges to prevent duplicate footage.
+- Added source-aware H.264 bitrate ceilings so compact AV1 inputs no longer balloon into disproportionately large Batch outputs.
+- Added normalized export timestamps, expected-duration verification, and actual tail-frame decoding; invalid generated files are removed and their sources are always kept.
+- Added a compact Batch tab for individual videos and recursive folder queues, with persistent per-video enable/review state.
+- Added one-pass multi-character face analysis with Rapid, Balanced, and Thorough quality presets plus background progress, pause, and safe cancellation.
+- Added automatic appearance grouping, optional manual A/B review handoff, per-appearance or per-source/character compilation exports, and character-aware filenames.
+- Added FFprobe output validation and opt-in Linux Trash cleanup that never runs after no-match, partial success, failure, cancellation, or pending review.
+- Added Phase 1 reusable characters with encrypted Clipivo-only storage and reference management.
+- Added one ad-hoc character target per imported video, isolated from the reusable library.
+- Added face-reference validation, outlier warnings, still-photo match testing, GPU preference, and CPU fallback settings.
+- Added cancellable local face tasks and a replaceable InsightFace engine interface.
+- Added comprehensive tooltips plus visible Clipivo 0.2.0 and Long Weekend Labs branding/About details.
+- Consolidated scattered People-page controls into compact contextual toolbars and overflow menus.
+- Added recursive batch character import using immediate subfolders as reusable character names, with safe merging and face validation.
+- Added a cancellable, cached `Find character` scan using fast coarse sampling plus local refinement across the complete video.
+- Added automatic high-resolution and careful fallbacks so a fast-search miss is never reported as a final character result.
+- Replaced Qt Multimedia playback on Linux with embedded libVLC/dav1d playback, fixing AV1 video on GPUs without AV1 hardware decode.
+- Preserved requested playhead/A-marker positions while VLC opens a source, preventing playback from restarting at zero.
+- Suppressed noisy InsightFace provider diagnostics and known dependency deprecation warnings in normal source runs.
+- Added coalesced native VLC timeline previews, with one exact PyAV synchronization on mouse release.
+- Show overlapping A and B points as one explicit `A/B` timeline marker instead of allowing B to hide A.
+- Removed aggressive VLC frame skipping and synchronized seeks to the timestamp of the frame actually displayed.
+- Made long-video character location genuinely sparse by decoding keyframes only in both rapid passes, with local normal-frame refinement after a match.
+- Added Auto/NVIDIA NVENC/CPU exact-cut export settings, NVENC-to-CPU fallback, continuously drained FFmpeg output, and encoded-time progress.
+- Added application-wide Ctrl+P source-frame PNG capture and Ctrl+W window-close shortcuts, with a compact Settings reference.
+- Made native VLC scrubbing repaint continuously while dragging by briefly resuming muted playback for each coalesced seek.
+- Added distinct `Find next` character appearances by confirming the end of the current presence before searching for re-entry.
+- Replaced generated `_clip` names with `YYMMDD_HHMM_SSS` export tags and VLC-style date-plus-video-time PNG names.
+- Made timeline scrubbing lightweight by deferring compressed-video seeks until mouse release and avoiding hidden filter-preview frame copies.
+
+- Created the independent Clipivo project and private repository.
+- Added the approved Avidemux-style visual shell.
+- Added MP4/MKV/WebM/MOV/AVI/M4V probing and keyframe indexing.
+- Added playback, timeline seeking, exact frame stepping, and keyframe jumps.
+- Added manual A/B ranges, persistent clip review, and source-safe deletion.
+- Added visible separate/stitched export selection, source-copy MP4 and exact-cut MP4 modes.
+- Added A–B selection playback, preview volume/mute, and optional audio-free exports.
+- Compacted the manual editor around the video and replaced the empty character pane with a clips-only sidebar.
+- Moved Video, People, and Settings navigation into the top toolbar and removed the left rail.
+- Changed single-output exports to a named MP4 save dialog and added opposite-marker double-clicks.
+- Added an Avidemux-inspired Filters tab with ordered Transformation and Colors chains.
+- Added Crop, Rotate, Vertical Flip, Frame Rate resampling/speed change, and Contrast controls.
+- Added seekable input/output/side-by-side filter previews and filtered H.264/AAC export.
+- Reworked Filters into a preview-first tab with a compact library/active-chain inspector.
+- Added an interactive crop overlay with masked discard regions, draggable edges and corners, movable selection, guides, output dimensions, and synchronized pixel controls.
+- Moved filters into a dedicated modeless manager window opened by the Filters tab; it shows Categories, Available filters, and Active filters first, and reveals video preview only for Configure or Preview.
+- Changed filter add/edit into dedicated modal editors where OK commits and Cancel discards, matching the Avidemux manager workflow.
+- Expanded Contrast with sliders, luma/chroma plane switches, MPEG2-to-PC preset, and histogram preview; added shadow/midtone/highlight Color Balance.
+- Added filtered preview Play/Pause and Play A–B controls to every filter editor.
+- Kept Original/Filtered switching live during preview playback and made the preview timeline seek on click or drag.
+- Made Exact-cut MP4 the default export mode; source-copy remains available as an explicit quality-preserving option.

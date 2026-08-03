@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local/generated data
+models/
+cache/
+exports/
+*.log
+
+# Build and packaging artifacts
+build/
+dist/
+rpm-build/
+packaging/rpmbuild/
+packaging/.rpm-stage.*/
+*.rpm
+
+# Engineering and agent instructions stay local
+PROJECT.md
+ROADMAP.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.github/copilot-instructions.md
+archive/
+
+# OS/editor files
+.DS_Store

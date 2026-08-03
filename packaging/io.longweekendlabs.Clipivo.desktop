@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Clipivo
+Comment=Find and clip character appearances in video
+Exec=clipivo %F
+Icon=io.longweekendlabs.Clipivo
+Terminal=false
+StartupNotify=true
+StartupWMClass=Clipivo
+Categories=AudioVideo;Video;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;
+Keywords=video;clip;cut;character;face;
