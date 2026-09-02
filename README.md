@@ -30,7 +30,7 @@ The coarse scan is followed by 200 ms local boundary scans, so clips start and e
 
 ## It refuses to lose your footage
 
-Automatic exports use H.264 and AAC with a bitrate ceiling derived from the source, so a compact AV1 file does not balloon several times in size just because H.264 was chosen.
+Automatic exports use H.264 and AAC with a bitrate ceiling derived from the source, so a compact AV1 file does not balloon several times in size just because H.264 was chosen. Pick CPU encoding with libx264 or hand it to an NVIDIA card with NVENC; the queue tells you which one it used.
 
 Every result is checked before it is called a success: expected duration, plus a real decode of the frames at the end of the file. A failed result is deleted and its source kept. `Move source to Trash` is off by default, uses the Linux Trash rather than deleting, and runs only when every selected character produced a validated output. No-match, failed, cancelled, partial and unreviewed jobs always keep the source.
 
@@ -44,7 +44,7 @@ Preview the chain as input, filtered output, or the two compared, at any positio
 
 ## Or just cut it by hand
 
-Open an MP4, MKV, WebM, MOV, AVI or M4V. Seek by timeline, frame, or keyframe. Press `A` at the start, `B` at the end, `Ctrl+Enter` to add the range, and enable or disable ranges in the right pane.
+Open an MP4, MKV, WebM, MOV, AVI or M4V. Playback runs through libVLC, so anything VLC can decode plays here without a separate codec hunt. Seek by timeline, frame, or keyframe. Press `A` at the start, `B` at the end, `Ctrl+Enter` to add the range, and enable or disable ranges in the right pane.
 
 Exact-cut MP4 is the default and gives frame-accurate boundaries. Copy MP4 is there for when preserving the source stream without re-encoding matters more than an exact start on a non-keyframe.
 
