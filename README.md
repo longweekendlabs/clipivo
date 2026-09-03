@@ -4,6 +4,8 @@
 
 Clipivo is a local-first desktop video cutter. Teach it a face, point it at a folder of videos, and it finds every appearance of that person and exports each one as its own clip, or all of them stitched into a compilation. It also works as a plain, precise manual cutter when that is all you need. Everything runs on your own machine.
 
+![Clipivo showing several detected character appearances marked across a loaded video timeline](docs/screenshots/hero.png)
+
 ## Teach it a face once, use it everywhere
 
 Create a character and give it face photos: add them individually, import a folder, or capture the current video frame. Five to fifteen varied references work best.
@@ -41,6 +43,8 @@ An ordered chain you build yourself: Crop, Rotate, Vertical flip and Frame rate 
 Crop gives you a shaded on-picture selection with draggable edges and corners, a movable frame, guides, and numeric margins that stay in sync. Contrast covers 50 to 150% contrast, -127 to 127 brightness, separate luma and chroma processing, an MPEG2-to-PC preset and a live histogram. Color Balance gives shadows, midtones and highlights their own hue, chroma, luma and saturation.
 
 Preview the chain as input, filtered output, or the two compared, at any position. Every filter editor can play the filtered preview from where it sits or play only the A to B selection. Resample FPS keeps duration; Change speed creates synchronized slow and fast motion.
+
+![Clipivo's crop filter editor with numeric margins, guides and draggable overlay handles](docs/screenshots/filters.png)
 
 ## Or just cut it by hand
 
