@@ -85,6 +85,14 @@ class InsightFaceEngine:
             detector_size=min(320, self.detector_size),
         )
 
+    def wide_shot_engine(self) -> "InsightFaceEngine":
+        """Create a high-resolution detector that still sees small faces in wide studio shots."""
+        return InsightFaceEngine(
+            self.model_root,
+            use_gpu=self.use_gpu,
+            detector_size=max(1280, self.detector_size),
+        )
+
     def assess_references(
         self,
         named_bytes: list[tuple[str, bytes]],

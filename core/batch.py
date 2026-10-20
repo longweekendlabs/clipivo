@@ -166,6 +166,7 @@ def analyse_video_for_characters(
     cancelled: Callable[[], bool] | None = None,
     wait_if_paused: Callable[[], bool] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    refine_progress: Callable[[int, int], None] | None = None,
 ) -> list[CharacterAppearances]:
     if not targets:
         return []
@@ -236,6 +237,7 @@ def analyse_video_for_characters(
             interval_ms,
             cancelled,
             wait_if_paused,
+            refine_progress,
         )
         results.append(CharacterAppearances(
             target.id,
@@ -296,13 +298,16 @@ def _refine_appearance_ranges(
     coarse_interval_ms: int,
     cancelled: Callable[[], bool] | None,
     wait_if_paused: Callable[[], bool] | None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[ClipRange]:
     """Resolve coarse hits to nearby matching frames without adding hidden padding."""
     ranges: list[ClipRange] = []
     refinement_step_ms = 200
-    for group in groups:
+    for index, group in enumerate(groups):
         if cancelled and cancelled():
             break
+        if progress:
+            progress(index, len(groups))
         first_hit = group[0].timestamp_ms
         last_hit = group[-1].timestamp_ms
         start_matches = _scan_refinement_window(

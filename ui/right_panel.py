@@ -162,6 +162,7 @@ class RightPanel(QWidget):
     collapseRequested = Signal()
     targetRequested = Signal()
     findCharacterRequested = Signal()
+    findAllRequested = Signal()
 
     def __init__(self, project_dir: Path, parent=None):
         super().__init__(parent)
@@ -205,6 +206,14 @@ class RightPanel(QWidget):
         self._find_next_available = False
         self.find_character_button.clicked.connect(self.findCharacterRequested.emit)
         target_actions.addWidget(self.find_character_button)
+        self.find_all_button = QPushButton("Find all")
+        self.find_all_button.setObjectName("targetAction")
+        self.find_all_button.setEnabled(False)
+        self.find_all_button.setToolTip(
+            "Scan the complete video and turn every appearance of this character into a clip (Ctrl+Shift+F)"
+        )
+        self.find_all_button.clicked.connect(self.findAllRequested.emit)
+        target_actions.addWidget(self.find_all_button)
         self.target_actions_widget.hide()
         layout.addWidget(self.target_actions_widget)
         self.target_thumbnails = QWidget()
@@ -324,6 +333,7 @@ class RightPanel(QWidget):
         self.target_scope.setText(f"{scope_text} · ready to scan")
         self.set_find_next_available(False)
         self.find_character_button.setEnabled(True)
+        self.find_all_button.setEnabled(True)
         self.target_actions_widget.show()
         for index, label in enumerate(self.target_thumbnail_labels):
             if index < len(thumbnails):
@@ -341,6 +351,7 @@ class RightPanel(QWidget):
         else:
             self.find_character_button.setText("Find next" if self._find_next_available else "Find character")
         self.find_character_button.setEnabled(not running)
+        self.find_all_button.setEnabled(not running)
         scope_text = getattr(self, "_target_scope_text", "Selected character")
         if running:
             self.target_scope.setText(f"{scope_text} · scanning video")
@@ -370,9 +381,22 @@ class RightPanel(QWidget):
         self._target_scope_text = ""
         self.target_scope.setText("Reusable characters work across videos; ad-hoc targets stay with one video.")
         self.find_character_button.setEnabled(False)
+        self.find_all_button.setEnabled(False)
         self.set_find_next_available(False)
         self.target_actions_widget.hide()
         self.target_thumbnails.hide()
+
+    def set_find_all_running(self, running: bool) -> None:
+        self.find_all_button.setText("Finding all…" if running else "Find all")
+        self.find_all_button.setEnabled(not running)
+        self.find_character_button.setEnabled(not running)
+        scope_text = getattr(self, "_target_scope_text", "Selected character")
+        self.target_scope.setText(
+            f"{scope_text} · finding every appearance" if running else f"{scope_text} · ready to scan"
+        )
+
+    def select_stitched_output(self) -> None:
+        self.arrangement.setCurrentIndex(max(0, self.arrangement.findData("stitched")))
 
     def select_default_output_mode(self) -> None:
         index = self.output.findData("accurate")

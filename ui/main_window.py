@@ -50,6 +50,7 @@ from core.video_probe import ProbeError, probe_video
 
 from .about_dialog import AboutDialog
 from .batch_page import BatchPage
+from core.batch import BatchCharacterTarget, analyse_video_for_characters
 from .icons import line_icon
 from .filters_page import FiltersPage
 from .native_dialogs import choose_directory, choose_png_file, choose_save_file, choose_video
@@ -230,6 +231,56 @@ class FindCharacterWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class FindAllWorker(QThread):
+    progressed = Signal(int, int, str)
+    finishedRanges = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        source: Path,
+        duration_ms: int,
+        face_engine: FaceEngine,
+        target: BatchCharacterTarget,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.source = source
+        self.duration_ms = duration_ms
+        self.face_engine = face_engine
+        self.target = target
+
+    def cancel(self) -> None:
+        self.requestInterruption()
+
+    def run(self) -> None:
+        try:
+            results = analyse_video_for_characters(
+                self.source,
+                self.face_engine,
+                [self.target],
+                duration_ms=self.duration_ms,
+                quality="balanced",
+                cancelled=self.isInterruptionRequested,
+                progress=lambda current, total, _label: self.progressed.emit(
+                    current, total, "Scanning the whole video"
+                ),
+                refine_progress=lambda done, total: self.progressed.emit(
+                    done, max(1, total), f"Tightening clip edges {done + 1} of {total}"
+                ),
+            )
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
+            self.finishedRanges.emit(list(results[0].ranges) if results else [])
+        except Exception as exc:  # noqa: BLE001
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+            else:
+                self.failed.emit(str(exc))
+
+
 class VideoPreview(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -329,7 +380,10 @@ class MainWindow(QMainWindow):
         self.export_progress: QProgressDialog | None = None
         self.find_worker: FindCharacterWorker | None = None
         self.find_progress: QProgressDialog | None = None
+        self.find_all_worker: FindAllWorker | None = None
+        self.find_all_progress: QProgressDialog | None = None
         self.search_face_engine: FaceEngine | None = None
+        self.find_all_face_engine: FaceEngine | None = None
         self._find_start_ms = 0
         self._find_end_ms = 0
         self._find_fingerprint = ""
@@ -402,6 +456,14 @@ class MainWindow(QMainWindow):
             "Scan the complete video and jump to the first matching frame; successful results are cached",
         )
         find_character.setEnabled(False)
+        find_all = create(
+            "find_all",
+            "Find all appearances",
+            self._find_all,
+            "Ctrl+Shift+F",
+            "Scan the complete video and turn every appearance of the target into a clip",
+        )
+        find_all.setEnabled(False)
         create("video_page", "Video", lambda: self._select_page(0))
         create("filters_page", "Filters", lambda: self._select_page(1))
         create("batch_page", "Batch", lambda: self._select_page(2))
@@ -420,7 +482,7 @@ class MainWindow(QMainWindow):
             "File": ["open", "export", "screenshot", "close_window", "exit"],
             "Edit": ["marker_a", "marker_b", "add_range", "remove_clip"],
             "View": ["collapse", "start", "end"],
-            "Video": ["play", "play_selection", "stop", "previous_frame", "next_frame", "previous_keyframe", "next_keyframe", "find_character"],
+            "Video": ["play", "play_selection", "stop", "previous_frame", "next_frame", "previous_keyframe", "next_keyframe", "find_character", "find_all"],
             "Tools": ["filters_page", "batch_page", "settings"],
             "Help": ["about"],
         }
@@ -623,6 +685,7 @@ class MainWindow(QMainWindow):
         self.right_panel.addRangeRequested.connect(self._add_manual_range)
         self.right_panel.targetRequested.connect(lambda: self._select_page(3))
         self.right_panel.findCharacterRequested.connect(self._find_character)
+        self.right_panel.findAllRequested.connect(self._find_all)
         self.right_panel.clip_model.dataChanged.connect(lambda *_args: self._persist_ranges())
         side_layout.addWidget(self.right_panel, 1)
         splitter.addWidget(self.side_container)
@@ -740,6 +803,10 @@ class MainWindow(QMainWindow):
             return
         if self.find_worker and self.find_worker.isRunning():
             self.find_worker.cancel()
+            self.ready_text.setText("Cancelling character scan…")
+            return
+        if self.find_all_worker and self.find_all_worker.isRunning():
+            self.find_all_worker.cancel()
             self.ready_text.setText("Cancelling character scan…")
             return
         self._stop(decode_frame=False)
@@ -1162,6 +1229,7 @@ class MainWindow(QMainWindow):
     def _set_current_target(self, character: CharacterRecord, persist: bool) -> None:
         self.current_target = character
         self.actions["find_character"].setEnabled(bool(self.video_info))
+        self.actions["find_all"].setEnabled(bool(self.video_info))
         self.detected_appearances = []
         self._find_is_next = False
         self.timeline.detections = []
@@ -1182,6 +1250,7 @@ class MainWindow(QMainWindow):
         self.current_target = None
         if hasattr(self, "actions"):
             self.actions["find_character"].setEnabled(False)
+            self.actions["find_all"].setEnabled(False)
         self.detected_appearances = []
         self._find_is_next = False
         if hasattr(self, "timeline"):
@@ -1226,6 +1295,8 @@ class MainWindow(QMainWindow):
             )
             return
         if self.find_worker and self.find_worker.isRunning():
+            return
+        if self.find_all_worker and self.find_all_worker.isRunning():
             return
 
         threshold = self.people_page.match_threshold
@@ -1388,6 +1459,152 @@ class MainWindow(QMainWindow):
         self.right_panel.set_find_running(False)
         self.actions["find_character"].setEnabled(bool(self.video_info and self.current_target))
 
+    def _find_all(self) -> None:
+        if not self.video_info or not self.current_target or not self.character_store or not self.face_engine:
+            QMessageBox.information(
+                self,
+                "Choose a target",
+                "Open a video and choose a character with reference photos first.",
+            )
+            return
+        if (self.find_worker and self.find_worker.isRunning()) or (
+            self.find_all_worker and self.find_all_worker.isRunning()
+        ):
+            return
+        if self.batch_page.worker and self.batch_page.worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Batch is running",
+                "Wait for the Batch queue to finish, or cancel it, before finding all appearances here.",
+            )
+            return
+        try:
+            references = list(self.character_store.iter_reference_bytes(self.current_target.id))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not load references", str(exc))
+            return
+        if not references:
+            QMessageBox.information(
+                self,
+                "No reference photos",
+                f"Add at least one usable face reference to {self.current_target.name} before scanning.",
+            )
+            return
+        target = BatchCharacterTarget(
+            self.current_target.id,
+            self.current_target.name,
+            references,
+            self.people_page.match_threshold,
+        )
+        self.player.stop()
+        self._manual_frame = True
+        self.right_panel.set_find_all_running(True)
+        self.actions["find_character"].setEnabled(False)
+        self.actions["find_all"].setEnabled(False)
+        self.ready_text.setText(f"Finding every appearance of {target.name}…")
+        self.find_all_progress = QProgressDialog(
+            f"Finding every appearance of {target.name}…", "Cancel", 0, max(1, self.video_info.duration_ms), self
+        )
+        self.find_all_progress.setWindowTitle("Find all")
+        self.find_all_progress.setWindowModality(Qt.WindowModal)
+        self.find_all_progress.setMinimumDuration(0)
+        self.find_all_progress.setAutoClose(False)
+        self.find_all_progress.setAutoReset(False)
+        if self.find_all_face_engine is None:
+            factory = getattr(self.face_engine, "wide_shot_engine", None)
+            self.find_all_face_engine = factory() if callable(factory) else self.face_engine
+        worker = FindAllWorker(
+            self.video_info.path, self.video_info.duration_ms, self.find_all_face_engine, target, self
+        )
+        self.find_all_worker = worker
+        worker.progressed.connect(self._find_all_progressed)
+        worker.finishedRanges.connect(self._find_all_finished)
+        worker.failed.connect(self._find_all_failed)
+        worker.cancelled.connect(self._find_all_cancelled)
+        worker.finished.connect(lambda: self._find_all_worker_finished(worker))
+        self.find_all_progress.canceled.connect(worker.cancel)
+        worker.start()
+
+    def _find_all_progressed(self, current: int, total: int, label: str) -> None:
+        if not self.find_all_progress:
+            return
+        self.find_all_progress.setRange(0, max(1, total))
+        self.find_all_progress.setValue(max(0, min(current, total)))
+        if label.startswith("Scanning"):
+            label = f"{label}…\n{format_timecode(current)} / {format_timecode(total)}"
+        self.find_all_progress.setLabelText(label)
+
+    def _finish_find_all_ui(self) -> None:
+        if self.find_all_progress:
+            self.find_all_progress.close()
+            self.find_all_progress = None
+        self.right_panel.set_find_all_running(False)
+        has_target = bool(self.video_info and self.current_target)
+        self.actions["find_character"].setEnabled(has_target)
+        self.actions["find_all"].setEnabled(has_target)
+
+    def _find_all_finished(self, ranges: list[ClipRange]) -> None:
+        self._finish_find_all_ui()
+        name = self.current_target.name if self.current_target else "The selected character"
+        if not ranges:
+            self.right_panel.set_find_result("not found")
+            self.ready_text.setText(f"{name} not found")
+            QMessageBox.information(
+                self,
+                "Character not found",
+                f"Clipivo scanned the complete video but did not find {name}.\n\n"
+                "Try more varied references or a lower Match strictness setting.",
+            )
+            return
+        # Earlier automatic results are replaced; clips you marked by hand stay.
+        manual = [item for item in self.right_panel.ranges() if not item.origin.startswith("automatic")]
+        clips = sorted([*manual, *ranges], key=lambda item: item.start_ms)
+        self.right_panel.set_clips(clips)
+        self.right_panel.select_stitched_output()
+        self._persist_ranges()
+        # Mark every appearance on the timeline without arming Find next.
+        self.detected_appearances = []
+        self._set_find_next_mode(False)
+        self.right_panel.set_find_next_available(False)
+        self.timeline.detections = [item.start_ms for item in ranges]
+        self.timeline.update()
+        self._activate_clip(ranges[0])
+        total_ms = sum(item.duration_ms for item in ranges)
+        summary = (
+            f"{len(ranges)} appearance{'s' if len(ranges) != 1 else ''} · "
+            f"{format_timecode(total_ms)} of {format_timecode(self.video_info.duration_ms)}"
+        )
+        self.right_panel.set_find_result(summary)
+        self.ready_text.setText(f"{name}: {summary}")
+        box = QMessageBox(self)
+        box.setWindowTitle("Clips ready")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"Found {name} {len(ranges)} time{'s' if len(ranges) != 1 else ''}.")
+        box.setInformativeText(
+            f"Together that is {format_timecode(total_ms)} of video. "
+            "Save them now as one stitched video, or review the clips on the right first."
+        )
+        save = box.addButton("Save stitched video", QMessageBox.AcceptRole)
+        box.addButton("Review first", QMessageBox.RejectRole)
+        box.setDefaultButton(save)
+        box.exec()
+        if box.clickedButton() is save:
+            self._request_export_selected_mode()
+
+    def _find_all_failed(self, detail: str) -> None:
+        self._finish_find_all_ui()
+        self.ready_text.setText("Character scan failed")
+        QMessageBox.critical(self, "Could not scan video", detail)
+
+    def _find_all_cancelled(self) -> None:
+        self._finish_find_all_ui()
+        self.ready_text.setText("Character scan cancelled")
+
+    def _find_all_worker_finished(self, worker: FindAllWorker) -> None:
+        if self.find_all_worker is worker:
+            self.find_all_worker = None
+        worker.deleteLater()
+
     def _find_worker_finished(self, worker: FindCharacterWorker) -> None:
         if self.find_worker is worker:
             self.find_worker = None
@@ -1412,6 +1629,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "batch_page"):
             self.batch_page.set_match_threshold(threshold)
         self.search_face_engine = None
+        self.find_all_face_engine = None
         if self.face_engine:
             if hasattr(self.face_engine, "use_gpu"):
                 self.face_engine.use_gpu = use_gpu
@@ -1630,6 +1848,9 @@ class MainWindow(QMainWindow):
         if self.find_worker and self.find_worker.isRunning():
             self.find_worker.cancel()
             self.find_worker.wait(5000)
+        if self.find_all_worker and self.find_all_worker.isRunning():
+            self.find_all_worker.cancel()
+            self.find_all_worker.wait(5000)
         if self.probe_worker and self.probe_worker.isRunning():
             self.probe_worker.wait(5000)
         super().closeEvent(event)

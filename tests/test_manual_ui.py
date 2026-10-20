@@ -327,6 +327,67 @@ class ManualUiTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_find_all_replaces_automatic_clips_and_keeps_manual_ones(self) -> None:
+        window = MainWindow(Path(__file__).resolve().parents[1])
+        try:
+            window._video_opened(probe_video(self.video))
+            manual = ClipRange(0, 200, origin="manual")
+            window.right_panel.set_clips([manual, ClipRange(600, 800, origin="automatic")])
+            found = [ClipRange(300, 700, origin="automatic"), ClipRange(1200, 1800, origin="automatic_uncertain")]
+            with (
+                patch("ui.main_window.QMessageBox.exec", return_value=0),
+                patch("ui.main_window.QMessageBox.clickedButton", return_value=None),
+                patch.object(window, "_request_export_selected_mode") as export,
+                patch("ui.main_window.save_ranges"),
+            ):
+                window._find_all_finished(found)
+            export.assert_not_called()
+            clips = window.right_panel.ranges()
+            self.assertEqual([(c.start_ms, c.end_ms) for c in clips], [(0, 200), (300, 700), (1200, 1800)])
+            self.assertEqual(window.right_panel.arrangement.currentData(), "stitched")
+            self.assertEqual(window.timeline.detections, [300, 1200])
+            self.assertEqual(window.detected_appearances, [])
+            self.assertEqual((window.marker_a, window.marker_b), (300, 700))
+        finally:
+            window.close()
+
+    def test_find_all_save_button_exports_stitched_video(self) -> None:
+        window = MainWindow(Path(__file__).resolve().parents[1])
+        try:
+            window._video_opened(probe_video(self.video))
+            with (
+                patch("ui.main_window.QMessageBox.exec", return_value=0),
+                patch("ui.main_window.QMessageBox.clickedButton", lambda box: box.defaultButton()),
+                patch.object(window, "_request_export_selected_mode") as export,
+                patch("ui.main_window.save_ranges"),
+            ):
+                window._find_all_finished([ClipRange(100, 900, origin="automatic")])
+            export.assert_called_once_with()
+        finally:
+            window.close()
+
+    def test_find_all_worker_reports_ranges_and_refinement_progress(self) -> None:
+        from core.batch import BatchCharacterTarget, CharacterAppearances
+        from ui.main_window import FindAllWorker
+
+        ranges = (ClipRange(100, 900, origin="automatic"),)
+
+        def fake_analyse(*_args, progress, refine_progress, **_kwargs):
+            progress(500, 2000, "Analysing faces")
+            refine_progress(0, 1)
+            return [CharacterAppearances("id", "Presenter", (), ranges)]
+
+        target = BatchCharacterTarget("id", "Presenter", [("a.png", b"x")], 0.4)
+        worker = FindAllWorker(self.video, 2000, MagicMock(), target)
+        progress, results = [], []
+        worker.progressed.connect(lambda *args: progress.append(args))
+        worker.finishedRanges.connect(results.append)
+        with patch("ui.main_window.analyse_video_for_characters", side_effect=fake_analyse):
+            worker.run()
+        self.assertEqual(results, [list(ranges)])
+        self.assertEqual(progress[0], (500, 2000, "Scanning the whole video"))
+        self.assertEqual(progress[1], (0, 1, "Tightening clip edges 1 of 1"))
+
     def test_double_marker_press_sets_the_opposite_marker(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1])
         try:
