@@ -75,7 +75,6 @@ class FaceTaskWorker(QThread):
 
 
 class PeoplePage(QWidget):
-    targetActivated = Signal(object)
     referencesChanged = Signal(object)
     characterDeleted = Signal(str)
 
@@ -104,12 +103,10 @@ class PeoplePage(QWidget):
         root.setSpacing(7)
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("Characters")
+        title = QLabel("People")
         title.setObjectName("pageTitle")
-        title.setToolTip("Manage reusable characters and the current video's ad-hoc target")
-        subtitle = QLabel("Encrypted reusable references, plus one private target scoped to the imported video.")
+        subtitle = QLabel("Save people you'll look for again. Their photos are stored encrypted on this computer.")
         subtitle.setObjectName("pageSubtitle")
-        subtitle.setToolTip("Ad-hoc references remain available only for their source video project")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
@@ -135,16 +132,15 @@ class PeoplePage(QWidget):
         library = QWidget()
         library_layout = QVBoxLayout(library)
         library_layout.setContentsMargins(0, 0, 5, 0)
-        reusable_group = QGroupBox("Reusable characters")
-        reusable_group.setToolTip("Characters available to every imported video")
+        reusable_group = QGroupBox("Saved people")
         reusable_layout = QVBoxLayout(reusable_group)
         reusable_toolbar = QHBoxLayout()
         reusable_toolbar.setSpacing(4)
-        self.new_button = self._button("New character", "Create a reusable character", self._new_character)
+        self.new_button = self._button("New person", "Save a new person you can pick in Video and Batch", self._new_character)
         self.new_button.setObjectName("primaryCompact")
         self.batch_button = self._button(
             "Batch import",
-            "Choose a root folder; every immediate subfolder becomes a reusable character",
+            "Choose a folder; each subfolder of photos becomes a saved person named after it",
             self._batch_import,
         )
         self.batch_button.setIcon(line_icon("open", size=16))
@@ -154,13 +150,13 @@ class PeoplePage(QWidget):
         self.character_menu_button = QToolButton()
         self.character_menu_button.setText("⋯")
         self.character_menu_button.setObjectName("compactMenu")
-        self.character_menu_button.setToolTip("Rename or delete the selected reusable character")
+        self.character_menu_button.setToolTip("Rename or delete the selected person")
         self.character_menu_button.setPopupMode(QToolButton.InstantPopup)
         character_menu = QMenu(self.character_menu_button)
-        self.rename_action = QAction("Rename character…", self)
+        self.rename_action = QAction("Rename…", self)
         self.rename_action.setToolTip("Rename the selected reusable character")
         self.rename_action.triggered.connect(self._rename_character)
-        self.delete_action = QAction("Delete character…", self)
+        self.delete_action = QAction("Delete…", self)
         self.delete_action.setToolTip("Delete the selected reusable character and encrypted references")
         self.delete_action.triggered.connect(self._delete_character)
         character_menu.addAction(self.rename_action)
@@ -170,63 +166,29 @@ class PeoplePage(QWidget):
         reusable_layout.addLayout(reusable_toolbar)
         self.character_list = QListWidget()
         self.character_list.setObjectName("characterList")
-        self.character_list.setToolTip("Select a reusable character to manage or use for this video")
+        self.character_list.setToolTip("Select a person to see and edit their photos")
         self.character_list.currentItemChanged.connect(self._persistent_selected)
         reusable_layout.addWidget(self.character_list, 1)
         library_layout.addWidget(reusable_group, 1)
 
-        adhoc_group = QGroupBox("This video only")
-        adhoc_group.setToolTip("An ad-hoc target stored separately for the current video")
-        adhoc_layout = QVBoxLayout(adhoc_group)
-        adhoc_row = QHBoxLayout()
-        self.adhoc_name = QLabel("Open a video to create an ad-hoc target")
-        self.adhoc_name.setWordWrap(True)
-        self.adhoc_name.setToolTip("The ad-hoc character attached to the current imported video")
-        adhoc_row.addWidget(self.adhoc_name, 1)
-        self.adhoc_button = self._button("Create ad-hoc", "Create or select a target used only for this video", self._create_or_select_adhoc)
-        adhoc_row.addWidget(self.adhoc_button)
-        self.adhoc_menu_button = QToolButton()
-        self.adhoc_menu_button.setText("⋯")
-        self.adhoc_menu_button.setObjectName("compactMenu")
-        self.adhoc_menu_button.setToolTip("Rename or delete this video's ad-hoc character")
-        self.adhoc_menu_button.setPopupMode(QToolButton.InstantPopup)
-        adhoc_menu = QMenu(self.adhoc_menu_button)
-        self.adhoc_rename_action = QAction("Rename ad-hoc…", self)
-        self.adhoc_rename_action.setToolTip("Rename this video's ad-hoc target")
-        self.adhoc_rename_action.triggered.connect(self._rename_adhoc)
-        self.adhoc_delete_action = QAction("Delete ad-hoc…", self)
-        self.adhoc_delete_action.setToolTip("Delete this video's ad-hoc target and encrypted references")
-        self.adhoc_delete_action.triggered.connect(self._delete_adhoc)
-        adhoc_menu.addAction(self.adhoc_rename_action)
-        adhoc_menu.addAction(self.adhoc_delete_action)
-        self.adhoc_menu_button.setMenu(adhoc_menu)
-        adhoc_row.addWidget(self.adhoc_menu_button)
-        adhoc_layout.addLayout(adhoc_row)
-        library_layout.addWidget(adhoc_group)
         splitter.addWidget(library)
 
         editor = QWidget()
         editor_layout = QVBoxLayout(editor)
         editor_layout.setContentsMargins(5, 0, 0, 0)
         selection_header = QHBoxLayout()
-        self.selection_title = QLabel("Select a character")
+        self.selection_title = QLabel("Select a person")
         self.selection_title.setObjectName("sectionTitle")
         self.selection_title.setToolTip("Character currently being edited")
-        self.scope_label = QLabel("")
-        self.scope_label.setObjectName("scopeBadge")
-        self.scope_label.setToolTip("Reusable characters work across videos; ad-hoc characters belong to one video")
-        self.use_button = self._button("Use for this video", "Select this character as the analysis target for the imported video", self._activate_target)
         selection_header.addWidget(self.selection_title)
-        selection_header.addWidget(self.scope_label)
         selection_header.addStretch()
-        selection_header.addWidget(self.use_button)
         editor_layout.addLayout(selection_header)
 
         reference_toolbar = QHBoxLayout()
         reference_toolbar.setSpacing(4)
         self.add_references_button = QToolButton()
         self.add_references_button.setObjectName("referenceAdd")
-        self.add_references_button.setText("Add references")
+        self.add_references_button.setText("Add photos")
         self.add_references_button.setIcon(line_icon("open", size=16))
         self.add_references_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.add_references_button.setPopupMode(QToolButton.InstantPopup)
@@ -235,7 +197,7 @@ class PeoplePage(QWidget):
         self.add_photos_action = QAction("Choose photos…", self)
         self.add_photos_action.setToolTip("Validate and add one or more face reference images")
         self.add_photos_action.triggered.connect(self._add_photos)
-        self.add_folder_action = QAction("Add folder to this character…", self)
+        self.add_folder_action = QAction("Add a folder of photos…", self)
         self.add_folder_action.setToolTip("Recursively add supported images from one folder to the selected character")
         self.add_folder_action.triggered.connect(self._add_folder)
         self.capture_action = QAction("Capture current video frame", self)
@@ -248,12 +210,12 @@ class PeoplePage(QWidget):
         self.delete_reference_button = self._button("Remove", "Delete the selected encrypted reference image", self._delete_reference)
         reference_toolbar.addWidget(self.delete_reference_button)
         reference_toolbar.addSpacing(8)
-        self.validate_button = self._button("Validate set", "Check stored references for missing faces and inconsistent outliers", self._validate_set)
+        self.validate_button = self._button("Check photos", "Look for photos without a face or that don't look like the others", self._validate_set)
         self.test_button = self._button("Test photo", "Compare a still image against this character's reference set", self._test_photo)
         reference_toolbar.addWidget(self.validate_button)
         reference_toolbar.addWidget(self.test_button)
         reference_toolbar.addStretch()
-        self.validation_summary = QLabel("5–15 varied face references are recommended.")
+        self.validation_summary = QLabel("5–15 varied photos work best.")
         self.validation_summary.setObjectName("referenceHint")
         self.validation_summary.setToolTip("Reference validation and consistency result")
         reference_toolbar.addWidget(self.validation_summary)
@@ -296,11 +258,7 @@ class PeoplePage(QWidget):
         self.match_threshold = min(0.95, max(0.05, float(threshold)))
 
     def refresh(self, select_id: str = "") -> None:
-        if (
-            self.current_character
-            and self.current_character.is_adhoc
-            and self.current_character.project_id != self.project_id
-        ):
+        if self.current_character and self.current_character.is_adhoc:
             self.current_character = None
         current_id = select_id or (self.current_character.id if self.current_character else "")
         self.character_list.blockSignals(True)
@@ -308,9 +266,8 @@ class PeoplePage(QWidget):
         if self.store:
             for character in self.store.characters():
                 count = len(self.store.references(character.id))
-                item = QListWidgetItem(f"{character.name}  ·  {count} reference{'s' if count != 1 else ''}")
+                item = QListWidgetItem(f"{character.name}  ·  {count} photo{'s' if count != 1 else ''}")
                 item.setData(CHARACTER_ROLE, character)
-                item.setToolTip(f"Reusable character: {character.name} ({count} encrypted references)")
                 self.character_list.addItem(item)
                 if character.id == current_id:
                     self.character_list.setCurrentItem(item)
@@ -318,22 +275,6 @@ class PeoplePage(QWidget):
         selected_item = self.character_list.currentItem()
         if selected_item:
             self._select_character(selected_item.data(CHARACTER_ROLE))
-        adhoc = self.store.adhoc_for_project(self.project_id) if self.store and self.project_id else None
-        if adhoc:
-            count = len(self.store.references(adhoc.id))
-            self.adhoc_name.setText(f"{adhoc.name}\n{count} encrypted reference{'s' if count != 1 else ''} · {self.video_name}")
-            if adhoc.id == current_id:
-                self._select_character(adhoc)
-        else:
-            self.adhoc_name.setText(
-                f"No ad-hoc target for {self.video_name}" if self.project_id
-                else "Open a video to create an ad-hoc target"
-            )
-        self.adhoc_button.setText("Select ad-hoc" if adhoc else "Create ad-hoc")
-        self.adhoc_button.setEnabled(bool(self.store and self.project_id))
-        self.adhoc_menu_button.setEnabled(bool(adhoc))
-        self.adhoc_rename_action.setEnabled(bool(adhoc))
-        self.adhoc_delete_action.setEnabled(bool(adhoc))
         enabled = bool(self.store)
         self.new_button.setEnabled(enabled)
         self.batch_button.setEnabled(enabled)
@@ -362,12 +303,10 @@ class PeoplePage(QWidget):
         self.current_character = character
         self.reference_list.clear()
         if not character or not self.store:
-            self.selection_title.setText("Select a character")
-            self.scope_label.clear()
+            self.selection_title.setText("Select a person")
             self._update_editor_enabled()
             return
         self.selection_title.setText(character.name)
-        self.scope_label.setText("AD-HOC · THIS VIDEO" if character.is_adhoc else "REUSABLE")
         for reference in self.store.references(character.id):
             pixmap = QPixmap()
             pixmap.loadFromData(self.store.reference_bytes(reference.id))
@@ -377,16 +316,15 @@ class PeoplePage(QWidget):
             item.setToolTip(f"Encrypted reference: {reference.filename}")
             self.reference_list.addItem(item)
         count = self.reference_list.count()
-        self.validation_summary.setText(f"{count} reference{'s' if count != 1 else ''}; 5–15 recommended.")
+        self.validation_summary.setText(f"{count} photo{'s' if count != 1 else ''} · 5–15 varied photos work best.")
         self._update_editor_enabled()
 
     def _update_editor_enabled(self) -> None:
         selected = bool(self.current_character and self.store)
-        persistent = selected and not self.current_character.is_adhoc
+        persistent = selected
         self.character_menu_button.setEnabled(bool(persistent))
         self.rename_action.setEnabled(bool(persistent))
         self.delete_action.setEnabled(bool(persistent))
-        self.use_button.setEnabled(bool(selected and self.project_id))
         self.add_references_button.setEnabled(selected)
         self.add_photos_action.setEnabled(selected)
         self.add_folder_action.setEnabled(selected)
@@ -398,7 +336,7 @@ class PeoplePage(QWidget):
     def _new_character(self) -> None:
         if not self.store:
             return
-        name, accepted = QInputDialog.getText(self, "New reusable character", "Character name:")
+        name, accepted = QInputDialog.getText(self, "New person", "Name:")
         if accepted and name.strip():
             try:
                 character = self.store.create_character(name)
@@ -407,29 +345,7 @@ class PeoplePage(QWidget):
                 QMessageBox.warning(self, "Could not create character", str(exc))
 
     def _rename_character(self) -> None:
-        self._rename_current("Rename reusable character")
-
-    def _rename_adhoc(self) -> None:
-        adhoc = self.store.adhoc_for_project(self.project_id) if self.store and self.project_id else None
-        if adhoc:
-            self._select_character(adhoc)
-            self._rename_current("Rename ad-hoc target")
-
-    def _delete_adhoc(self) -> None:
-        adhoc = self.store.adhoc_for_project(self.project_id) if self.store and self.project_id else None
-        if not adhoc or not self.store:
-            return
-        count = len(self.store.references(adhoc.id))
-        if QMessageBox.question(
-            self,
-            "Delete ad-hoc target",
-            f"Delete '{adhoc.name}' and its {count} encrypted reference image(s) from this video?",
-        ) == QMessageBox.Yes:
-            self.store.delete_character(adhoc.id)
-            if self.current_character and self.current_character.id == adhoc.id:
-                self.current_character = None
-            self.refresh()
-            self.characterDeleted.emit(adhoc.id)
+        self._rename_current("Rename person")
 
     def _rename_current(self, title: str) -> None:
         if not self.store or not self.current_character:
@@ -448,7 +364,7 @@ class PeoplePage(QWidget):
         count = len(self.store.references(self.current_character.id))
         answer = QMessageBox.question(
             self,
-            "Delete reusable character",
+            "Delete person",
             f"Delete '{self.current_character.name}' and its {count} encrypted reference image(s)?",
         )
         if answer == QMessageBox.Yes:
@@ -457,24 +373,6 @@ class PeoplePage(QWidget):
             self.current_character = None
             self.refresh()
             self.characterDeleted.emit(deleted_id)
-
-    def _create_or_select_adhoc(self) -> None:
-        if not self.store or not self.project_id:
-            return
-        adhoc = self.store.adhoc_for_project(self.project_id)
-        if not adhoc:
-            default = f"Ad-hoc · {Path(self.video_name).stem}" if self.video_name else "Ad-hoc target"
-            name, accepted = QInputDialog.getText(self, "Ad-hoc character", "Name for this video's target:", text=default)
-            if not accepted or not name.strip():
-                return
-            adhoc = self.store.create_character(name, scope="adhoc", project_id=self.project_id)
-        self.character_list.clearSelection()
-        self._select_character(adhoc)
-        self.refresh(adhoc.id)
-
-    def _activate_target(self) -> None:
-        if self.current_character and self.project_id:
-            self.targetActivated.emit(self.current_character)
 
     def _add_photos(self) -> None:
         paths = [Path(path) for path in choose_images(self)]

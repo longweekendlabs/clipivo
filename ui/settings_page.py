@@ -129,8 +129,8 @@ class SettingsPage(QWidget):
         privacy.setToolTip("How Clipivo stores references and the current model's distribution constraint")
         privacy_layout = QVBoxLayout(privacy)
         privacy_text = QLabel(
-            "Reusable and ad-hoc references are AES-256-GCM encrypted with a Clipivo-only key held "
-            "by the OS keyring. Ad-hoc characters are scoped to one imported video.\n\n"
+            "Saved people's photos are AES-256-GCM encrypted with a Clipivo-only key held by the OS keyring. "
+            "One-time photos stay in memory and are gone when Clipivo closes.\n\n"
             "InsightFace buffalo_l is suitable for this private development build, but its model "
             "licensing must be resolved before public or commercial distribution."
         )

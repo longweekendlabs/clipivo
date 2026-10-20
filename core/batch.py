@@ -70,6 +70,13 @@ class BatchConfiguration:
     include_audio: bool = True
     video_encoder: str = "auto"
     trash_after_success: bool = False
+    save_next_to_source: bool = True
+    mode: str = "accurate"
+
+    def output_dir_for(self, source: Path) -> Path:
+        if self.save_next_to_source or not self.output_dir:
+            return Path(source).parent
+        return Path(self.output_dir)
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -90,6 +97,8 @@ class BatchConfiguration:
             include_audio=bool(payload.get("include_audio", True)),
             video_encoder=encoder if encoder in {"auto", "nvenc", "cpu"} else "auto",
             trash_after_success=bool(payload.get("trash_after_success", False)),
+            save_next_to_source=bool(payload.get("save_next_to_source", not payload.get("output_dir"))),
+            mode="copy" if payload.get("mode") == "copy" else "accurate",
         )
 
 

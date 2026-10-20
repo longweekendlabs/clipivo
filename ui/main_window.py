@@ -4,7 +4,7 @@ import bisect
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QSize, Qt, QThread, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,18 +43,20 @@ from core.project_state import (
     save_ranges,
     save_target_selection,
 )
-from core.timecode import format_timecode
+from core.timecode import format_duration, format_timecode
 from core.video_controller import DecodeError, DecodedFrame, VideoController
 from core.video_analysis import AppearanceMatch, find_end_of_appearance, find_first_appearance
 from core.video_probe import ProbeError, probe_video
 
 from .about_dialog import AboutDialog
-from .batch_page import BatchPage
-from core.batch import BatchCharacterTarget, analyse_video_for_characters
+from .batch_page import BatchExecutionWorker, BatchPage
+from core.batch import BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
 from .icons import line_icon
+from .job_panel import OneTimePerson
 from .filters_page import FiltersPage
 from .native_dialogs import choose_directory, choose_png_file, choose_save_file, choose_video
 from .people_page import PeoplePage
+from .job_panel import JobPanel
 from .right_panel import RightPanel
 from .settings_page import SettingsPage
 from .styles import PALETTE, app_stylesheet
@@ -96,8 +98,10 @@ class ExportWorker(QThread):
         source_fps: float,
         video_encoder: str,
         parent=None,
+        output_character: str = "",
     ):
         super().__init__(parent)
+        self.output_character = output_character
         self.source = source
         self.clips = [ClipRange.from_dict(item.to_dict()) for item in clips]
         self.output_dir = output_dir
@@ -128,6 +132,7 @@ class ExportWorker(QThread):
                 filters=self.filters,
                 source_fps=self.source_fps,
                 video_encoder=self.video_encoder,
+                output_character=self.output_character,
             )
             self.succeeded.emit(outputs)
         except ExportError as exc:
@@ -231,56 +236,6 @@ class FindCharacterWorker(QThread):
             self.failed.emit(str(exc))
 
 
-class FindAllWorker(QThread):
-    progressed = Signal(int, int, str)
-    finishedRanges = Signal(object)
-    failed = Signal(str)
-    cancelled = Signal()
-
-    def __init__(
-        self,
-        source: Path,
-        duration_ms: int,
-        face_engine: FaceEngine,
-        target: BatchCharacterTarget,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.source = source
-        self.duration_ms = duration_ms
-        self.face_engine = face_engine
-        self.target = target
-
-    def cancel(self) -> None:
-        self.requestInterruption()
-
-    def run(self) -> None:
-        try:
-            results = analyse_video_for_characters(
-                self.source,
-                self.face_engine,
-                [self.target],
-                duration_ms=self.duration_ms,
-                quality="balanced",
-                cancelled=self.isInterruptionRequested,
-                progress=lambda current, total, _label: self.progressed.emit(
-                    current, total, "Scanning the whole video"
-                ),
-                refine_progress=lambda done, total: self.progressed.emit(
-                    done, max(1, total), f"Tightening clip edges {done + 1} of {total}"
-                ),
-            )
-            if self.isInterruptionRequested():
-                self.cancelled.emit()
-                return
-            self.finishedRanges.emit(list(results[0].ranges) if results else [])
-        except Exception as exc:  # noqa: BLE001
-            if self.isInterruptionRequested():
-                self.cancelled.emit()
-            else:
-                self.failed.emit(str(exc))
-
-
 class VideoPreview(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -380,16 +335,16 @@ class MainWindow(QMainWindow):
         self.export_progress: QProgressDialog | None = None
         self.find_worker: FindCharacterWorker | None = None
         self.find_progress: QProgressDialog | None = None
-        self.find_all_worker: FindAllWorker | None = None
-        self.find_all_progress: QProgressDialog | None = None
+        self.job_worker: BatchExecutionWorker | None = None
+        self._job_result: tuple[str, str, list[str]] = ("", "", [])
+        self.one_time_person = OneTimePerson(self)
         self.search_face_engine: FaceEngine | None = None
-        self.find_all_face_engine: FaceEngine | None = None
+        self.wide_face_engine: FaceEngine | None = None
         self._find_start_ms = 0
         self._find_end_ms = 0
         self._find_fingerprint = ""
         self._find_is_next = False
         self.export_video_encoder = "auto"
-        self._pending_batch_review: tuple[Path, str, str, list[ClipRange]] | None = None
 
         self.player = VlcPlaybackController(self)
         self.player.positionChanged.connect(self._on_player_position)
@@ -456,14 +411,6 @@ class MainWindow(QMainWindow):
             "Scan the complete video and jump to the first matching frame; successful results are cached",
         )
         find_character.setEnabled(False)
-        find_all = create(
-            "find_all",
-            "Find all appearances",
-            self._find_all,
-            "Ctrl+Shift+F",
-            "Scan the complete video and turn every appearance of the target into a clip",
-        )
-        find_all.setEnabled(False)
         create("video_page", "Video", lambda: self._select_page(0))
         create("filters_page", "Filters", lambda: self._select_page(1))
         create("batch_page", "Batch", lambda: self._select_page(2))
@@ -482,7 +429,7 @@ class MainWindow(QMainWindow):
             "File": ["open", "export", "screenshot", "close_window", "exit"],
             "Edit": ["marker_a", "marker_b", "add_range", "remove_clip"],
             "View": ["collapse", "start", "end"],
-            "Video": ["play", "play_selection", "stop", "previous_frame", "next_frame", "previous_keyframe", "next_keyframe", "find_character", "find_all"],
+            "Video": ["play", "play_selection", "stop", "previous_frame", "next_frame", "previous_keyframe", "next_keyframe", "find_character"],
             "Tools": ["filters_page", "batch_page", "settings"],
             "Help": ["about"],
         }
@@ -542,13 +489,11 @@ class MainWindow(QMainWindow):
             self.store_error,
             frame_provider=lambda: self.preview.source.copy(),
         )
-        self.people_page.targetActivated.connect(self._target_activated)
         self.people_page.referencesChanged.connect(self._target_references_changed)
         self.people_page.characterDeleted.connect(self._target_character_deleted)
-        self.batch_page = BatchPage(self.character_store, self.face_engine)
+        self.batch_page = BatchPage(self.character_store, self.face_engine, one_time=self.one_time_person)
         self.batch_page.openVideoRequested.connect(self._batch_open_video_requested)
-        self.batch_page.reviewRequested.connect(self._batch_review_requested)
-        self.batch_page.approveReviewRequested.connect(self._batch_review_approved)
+        self.batch_page.busy_elsewhere = self._video_job_running
         self.batch_page.set_match_threshold(self.people_page.match_threshold)
         self.pages.addWidget(self.batch_page)
         self.pages.addWidget(self.people_page)
@@ -597,6 +542,8 @@ class MainWindow(QMainWindow):
         self.pages.setCurrentIndex(stack_index)
         if index == 2:
             self.batch_page.refresh_characters()
+        if index == 0 and hasattr(self, "video_job"):
+            self.video_job.refresh_people()
         if hasattr(self, "page_tabs") and self.page_tabs.currentIndex() != index:
             self.page_tabs.blockSignals(True)
             self.page_tabs.setCurrentIndex(index)
@@ -678,14 +625,24 @@ class MainWindow(QMainWindow):
         self.restore_pane_button.hide()
         side_layout.addWidget(self.restore_pane_button, 0, Qt.AlignTop | Qt.AlignHCenter)
 
-        self.right_panel = RightPanel(self.project_dir)
+        self.video_job = JobPanel(
+            self.character_store,
+            self.face_engine,
+            self.one_time_person,
+            multiple=False,
+            settings_key="video_job",
+            start_text="Start",
+            frame_provider=lambda: self.preview.source.copy(),
+        )
+        self.video_job.start_button.setToolTip("Find the person in the whole video and save the result")
+        self.video_job.startRequested.connect(self._start_video_job)
+        self.video_job.cancelRequested.connect(self._cancel_video_job)
+        self.video_job.selectionChanged.connect(lambda: self._job_person_changed(persist=True))
+        self.right_panel = RightPanel(self.project_dir, self.video_job)
         self.right_panel.collapseRequested.connect(self._collapse_right)
         self.right_panel.clipActivated.connect(self._activate_clip)
-        self.right_panel.exportRequested.connect(self._request_export)
+        self.right_panel.saveClipsRequested.connect(self._save_clips)
         self.right_panel.addRangeRequested.connect(self._add_manual_range)
-        self.right_panel.targetRequested.connect(lambda: self._select_page(3))
-        self.right_panel.findCharacterRequested.connect(self._find_character)
-        self.right_panel.findAllRequested.connect(self._find_all)
         self.right_panel.clip_model.dataChanged.connect(lambda *_args: self._persist_ranges())
         side_layout.addWidget(self.right_panel, 1)
         splitter.addWidget(self.side_container)
@@ -805,9 +762,8 @@ class MainWindow(QMainWindow):
             self.find_worker.cancel()
             self.ready_text.setText("Cancelling character scan…")
             return
-        if self.find_all_worker and self.find_all_worker.isRunning():
-            self.find_all_worker.cancel()
-            self.ready_text.setText("Cancelling character scan…")
+        if self._video_job_running():
+            QMessageBox.information(self, "Clipivo is busy", "Finish or cancel the current job before opening another video.")
             return
         self._stop(decode_frame=False)
         self._clear_current_target()
@@ -842,90 +798,25 @@ class MainWindow(QMainWindow):
         self.source_label.setText(info.path.name)
         self.player.setSource(info.path)
         self.right_panel.set_clips(load_ranges(info.path))
-        self.right_panel.select_default_output_mode()
+        self.video_job.clear_status()
         self.filters_page.set_filters(load_filters(info.path))
         self.filters_page.set_source(info, self.preview.source)
         self._filters_changed(self.filters_page.filters(), persist=False)
         saved_target = load_target_selection(info.path)
-        self.people_page.set_video_context(project_id(info.path), info.path.name, saved_target.get("character_id", ""))
-        selected = self.people_page.selected_character()
-        if selected and selected.id == saved_target.get("character_id"):
-            if not selected.is_adhoc or selected.project_id == project_id(info.path):
-                self._set_current_target(selected, persist=False)
-            else:
-                self._clear_current_target()
-        else:
-            self._clear_current_target()
+        self.people_page.set_video_context(project_id(info.path), info.path.name)
+        if saved_target.get("scope") == "persistent":
+            self.video_job.select_person(saved_target.get("character_id", ""))
+        self._job_person_changed(persist=False)
         self._update_marker_labels()
         self._set_video_controls_enabled(True)
         self._set_status_for_info(info)
         self.ready_text.setText("Ready")
-        self._apply_pending_batch_review()
 
     def _batch_open_video_requested(self, source: Path) -> None:
-        self._pending_batch_review = None
         self._select_page(0)
         if self.video_info and self.video_info.path.resolve() == Path(source).resolve():
             return
         self.open_video(Path(source))
-
-    def _batch_review_requested(
-        self,
-        source: Path,
-        character_id: str,
-        character_name: str,
-        ranges: list[ClipRange],
-    ) -> None:
-        self._pending_batch_review = (
-            Path(source),
-            character_id,
-            character_name,
-            [ClipRange.from_dict(item.to_dict()) for item in ranges],
-        )
-        self._select_page(0)
-        if self.video_info and self.video_info.path.resolve() == Path(source).resolve():
-            self._apply_pending_batch_review()
-        else:
-            self.open_video(Path(source))
-
-    def _apply_pending_batch_review(self) -> None:
-        if not self._pending_batch_review or not self.video_info or not self.character_store:
-            return
-        source, character_id, character_name, ranges = self._pending_batch_review
-        if self.video_info.path.resolve() != source.resolve():
-            return
-        character = self.character_store.character(character_id)
-        if not character:
-            QMessageBox.critical(self, "Review unavailable", f"The character {character_name} is no longer available.")
-            return
-        self.people_page.refresh(character_id)
-        self._set_current_target(character, persist=True)
-        self.right_panel.set_clips(ranges)
-        self._persist_ranges()
-        if ranges:
-            self._activate_clip(ranges[0])
-        self.ready_text.setText(f"Reviewing {len(ranges)} automatic ranges for {character_name}")
-        self.statusBar().showMessage(
-            "Adjust A/B boundaries and the clip list, then return to Batch and approve reviewed clips.",
-            10000,
-        )
-        self._pending_batch_review = None
-
-    def _batch_review_approved(self, source: Path, character_id: str) -> None:
-        if (
-            not self.video_info
-            or self.video_info.path.resolve() != Path(source).resolve()
-            or not self.current_target
-            or self.current_target.id != character_id
-        ):
-            QMessageBox.information(
-                self,
-                "Open the review video",
-                "Open the pending review video and character before approving its clips.",
-            )
-            return
-        self.batch_page.approve_review(self.right_panel.ranges())
-        self._select_page(2)
 
     def _save_current_frame(self) -> None:
         if not self.video_info or not self.controller:
@@ -1221,26 +1112,30 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 self.ready_text.setText(f"Could not save filters: {exc}")
 
-    def _target_activated(self, character: CharacterRecord) -> None:
-        self._set_current_target(character, persist=True)
-        self._select_page(0)
-        self.ready_text.setText(f"Target selected: {character.name}")
+    def _job_person_changed(self, persist: bool) -> None:
+        people = self.video_job.selected_people()
+        if not people:
+            self._clear_current_target()
+            return
+        person = people[0]
+        scope = "session" if person.one_time else "persistent"
+        if self.current_target and self.current_target.id == person.id:
+            return
+        self._set_current_target(CharacterRecord(person.id, person.name, scope), persist)
+
+    def _current_person(self):
+        people = self.video_job.selected_people()
+        return people[0] if people else None
 
     def _set_current_target(self, character: CharacterRecord, persist: bool) -> None:
         self.current_target = character
         self.actions["find_character"].setEnabled(bool(self.video_info))
-        self.actions["find_all"].setEnabled(bool(self.video_info))
         self.detected_appearances = []
         self._find_is_next = False
         self.timeline.detections = []
         self.timeline.update()
         self._set_find_next_mode(False)
-        self.right_panel.set_target(
-            character.name,
-            character.scope,
-            self.people_page.reference_thumbnails(),
-        )
-        if persist and self.video_info:
+        if persist and self.video_info and character.scope == "persistent":
             try:
                 save_target_selection(self.video_info.path, character.id, character.scope)
             except OSError as exc:
@@ -1250,14 +1145,11 @@ class MainWindow(QMainWindow):
         self.current_target = None
         if hasattr(self, "actions"):
             self.actions["find_character"].setEnabled(False)
-            self.actions["find_all"].setEnabled(False)
         self.detected_appearances = []
         self._find_is_next = False
         if hasattr(self, "timeline"):
             self.timeline.detections = []
             self.timeline.update()
-        if hasattr(self, "right_panel"):
-            self.right_panel.clear_target()
 
     def _set_find_next_mode(self, enabled: bool) -> None:
         if not hasattr(self, "actions"):
@@ -1275,15 +1167,16 @@ class MainWindow(QMainWindow):
             )
 
     def _find_character(self) -> None:
-        if not self.video_info or not self.current_target or not self.character_store or not self.face_engine:
+        person = self._current_person() if hasattr(self, "video_job") else None
+        if not self.video_info or not self.current_target or not person or not self.face_engine:
             QMessageBox.information(
                 self,
-                "Choose a target",
-                "Open a video, choose a character with reference photos, and use it for this video first.",
+                "Who should Clipivo find?",
+                "Open a video and pick a person, or add photos, in the pane on the right.",
             )
             return
         try:
-            references = list(self.character_store.iter_reference_bytes(self.current_target.id))
+            references = self.video_job.references_for(person)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Could not load references", str(exc))
             return
@@ -1296,11 +1189,11 @@ class MainWindow(QMainWindow):
             return
         if self.find_worker and self.find_worker.isRunning():
             return
-        if self.find_all_worker and self.find_all_worker.isRunning():
+        if self._video_job_running():
             return
 
         threshold = self.people_page.match_threshold
-        self._find_fingerprint = self.character_store.fingerprint(self.current_target.id)
+        self._find_fingerprint = self.video_job.fingerprint_for(person)
         self._find_is_next = bool(self.detected_appearances)
         previous_match_ms = self.detected_appearances[-1] if self._find_is_next else None
         if not self._find_is_next:
@@ -1317,9 +1210,6 @@ class MainWindow(QMainWindow):
                 self._seek(cached)
                 self._set_find_next_mode(True)
                 message = f"{self.current_target.name} found at {format_timecode(cached)} · cached"
-                self.right_panel.set_find_result(
-                    f"found at {format_timecode(cached)} · cached", find_next=True
-                )
                 self.ready_text.setText(message)
                 return
 
@@ -1329,7 +1219,6 @@ class MainWindow(QMainWindow):
             self.detected_appearances = []
             self.timeline.detections = []
             self.timeline.update()
-        self.right_panel.set_find_running(True)
         self.actions["find_character"].setEnabled(False)
         self._find_start_ms = previous_match_ms or 0
         self._find_end_ms = self.video_info.duration_ms
@@ -1411,9 +1300,6 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         message = f"{name} found at {format_timecode(result.timestamp_ms)} · confidence {result.score:.2f}"
-        self.right_panel.set_find_result(
-            f"found at {format_timecode(result.timestamp_ms)}", find_next=True
-        )
         self.ready_text.setText(message)
         self.statusBar().showMessage(message, 8000)
 
@@ -1421,7 +1307,6 @@ class MainWindow(QMainWindow):
         name = self.current_target.name if self.current_target else "The selected character"
         self._finish_find_ui()
         if self._find_is_next:
-            self.right_panel.set_find_result("no later appearance", find_next=True)
             self.ready_text.setText(f"No later appearance of {name} found")
             title = "No later appearance"
             detail = (
@@ -1429,7 +1314,6 @@ class MainWindow(QMainWindow):
                 "of the video but found no later re-entry."
             )
         else:
-            self.right_panel.set_find_result("not found")
             self.ready_text.setText(f"{name} not found")
             title = "Character not found"
             detail = (
@@ -1456,153 +1340,132 @@ class MainWindow(QMainWindow):
         if self.find_progress:
             self.find_progress.close()
             self.find_progress = None
-        self.right_panel.set_find_running(False)
         self.actions["find_character"].setEnabled(bool(self.video_info and self.current_target))
 
-    def _find_all(self) -> None:
-        if not self.video_info or not self.current_target or not self.character_store or not self.face_engine:
-            QMessageBox.information(
-                self,
-                "Choose a target",
-                "Open a video and choose a character with reference photos first.",
-            )
-            return
-        if (self.find_worker and self.find_worker.isRunning()) or (
-            self.find_all_worker and self.find_all_worker.isRunning()
-        ):
-            return
-        if self.batch_page.worker and self.batch_page.worker.isRunning():
-            QMessageBox.information(
-                self,
-                "Batch is running",
-                "Wait for the Batch queue to finish, or cancel it, before finding all appearances here.",
-            )
-            return
-        try:
-            references = list(self.character_store.iter_reference_bytes(self.current_target.id))
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Could not load references", str(exc))
-            return
-        if not references:
-            QMessageBox.information(
-                self,
-                "No reference photos",
-                f"Add at least one usable face reference to {self.current_target.name} before scanning.",
-            )
-            return
-        target = BatchCharacterTarget(
-            self.current_target.id,
-            self.current_target.name,
-            references,
-            self.people_page.match_threshold,
+    def _video_job_running(self) -> bool:
+        return bool(self.job_worker and self.job_worker.isRunning()) or bool(
+            self.export_worker and self.export_worker.isRunning()
         )
+
+    def _wide_engine(self) -> FaceEngine:
+        if self.wide_face_engine is None:
+            factory = getattr(self.face_engine, "wide_shot_engine", None)
+            self.wide_face_engine = factory() if callable(factory) else self.face_engine
+        return self.wide_face_engine
+
+    def _start_video_job(self) -> None:
+        person = self._current_person()
+        if not self.video_info:
+            QMessageBox.information(self, "Open a video", "Open a video first, then press Start.")
+            return
+        if not person:
+            QMessageBox.information(self, "Who should Clipivo find?", "Pick a saved person, or add a few photos of the person.")
+            return
+        if not self.face_engine:
+            QMessageBox.critical(self, "Face engine unavailable", "Clipivo's local face engine is not configured.")
+            return
+        if self._video_job_running() or (self.find_worker and self.find_worker.isRunning()):
+            return
+        if self.batch_page.is_running():
+            QMessageBox.information(self, "Batch is running", "Wait for Batch to finish, or cancel it, before starting here.")
+            return
+        references = self.video_job.references_for(person)
+        if not references:
+            QMessageBox.information(self, "No photos", f"{person.name} has no photos yet.")
+            return
+        values = self.video_job.values()
+        if not values["save_next_to_source"] and not values["output_dir"]:
+            QMessageBox.information(self, "Choose a folder", "Pick where to save in Save to.")
+            return
+        configuration = BatchConfiguration(
+            videos=[BatchVideoEntry(str(self.video_info.path))],
+            output_dir=values["output_dir"],
+            arrangement=values["arrangement"],
+            include_audio=values["include_audio"],
+            video_encoder=self.export_video_encoder,
+            save_next_to_source=values["save_next_to_source"],
+            mode=values["mode"],
+        )
+        target = BatchCharacterTarget(person.id, person.name, references, self.people_page.match_threshold)
         self.player.stop()
         self._manual_frame = True
-        self.right_panel.set_find_all_running(True)
-        self.actions["find_character"].setEnabled(False)
-        self.actions["find_all"].setEnabled(False)
-        self.ready_text.setText(f"Finding every appearance of {target.name}…")
-        self.find_all_progress = QProgressDialog(
-            f"Finding every appearance of {target.name}…", "Cancel", 0, max(1, self.video_info.duration_ms), self
-        )
-        self.find_all_progress.setWindowTitle("Find all")
-        self.find_all_progress.setWindowModality(Qt.WindowModal)
-        self.find_all_progress.setMinimumDuration(0)
-        self.find_all_progress.setAutoClose(False)
-        self.find_all_progress.setAutoReset(False)
-        if self.find_all_face_engine is None:
-            factory = getattr(self.face_engine, "wide_shot_engine", None)
-            self.find_all_face_engine = factory() if callable(factory) else self.face_engine
-        worker = FindAllWorker(
-            self.video_info.path, self.video_info.duration_ms, self.find_all_face_engine, target, self
-        )
-        self.find_all_worker = worker
-        worker.progressed.connect(self._find_all_progressed)
-        worker.finishedRanges.connect(self._find_all_finished)
-        worker.failed.connect(self._find_all_failed)
-        worker.cancelled.connect(self._find_all_cancelled)
-        worker.finished.connect(lambda: self._find_all_worker_finished(worker))
-        self.find_all_progress.canceled.connect(worker.cancel)
+        self._job_result = ("", "", [])
+        worker = BatchExecutionWorker(configuration, [target], self._wide_engine(), self, filters=self.filters_page.filters())
+        self.job_worker = worker
+        worker.entryUpdated.connect(self._video_job_updated)
+        worker.rangesFound.connect(self._video_job_ranges)
+        worker.allFinished.connect(self._video_job_finished)
+        worker.finished.connect(lambda: self._video_job_stopped(worker))
+        self.video_job.set_running(True)
+        self.video_job.show_progress(0, f"Looking for {person.name}…")
+        self.ready_text.setText(f"Finding {person.name} in the whole video…")
         worker.start()
 
-    def _find_all_progressed(self, current: int, total: int, label: str) -> None:
-        if not self.find_all_progress:
-            return
-        self.find_all_progress.setRange(0, max(1, total))
-        self.find_all_progress.setValue(max(0, min(current, total)))
-        if label.startswith("Scanning"):
-            label = f"{label}…\n{format_timecode(current)} / {format_timecode(total)}"
-        self.find_all_progress.setLabelText(label)
+    def _cancel_video_job(self) -> None:
+        if self.job_worker and self.job_worker.isRunning():
+            self.job_worker.cancel()
+            self.video_job.show_progress(self.video_job.progress.value(), "Cancelling…")
+        if self.export_worker and self.export_worker.isRunning():
+            self.export_worker.cancel()
 
-    def _finish_find_all_ui(self) -> None:
-        if self.find_all_progress:
-            self.find_all_progress.close()
-            self.find_all_progress = None
-        self.right_panel.set_find_all_running(False)
-        has_target = bool(self.video_info and self.current_target)
-        self.actions["find_character"].setEnabled(has_target)
-        self.actions["find_all"].setEnabled(has_target)
+    def _video_job_updated(self, _entry_id: str, status: str, progress: int, detail: str, outputs: list[str]) -> None:
+        self._job_result = (status, detail, list(outputs) if outputs else self._job_result[2])
+        if status not in {"completed", "no_match", "failed", "cancelled"}:
+            self.video_job.show_progress(progress, detail)
+            self.ready_text.setText(detail)
 
-    def _find_all_finished(self, ranges: list[ClipRange]) -> None:
-        self._finish_find_all_ui()
-        name = self.current_target.name if self.current_target else "The selected character"
-        if not ranges:
-            self.right_panel.set_find_result("not found")
-            self.ready_text.setText(f"{name} not found")
-            QMessageBox.information(
-                self,
-                "Character not found",
-                f"Clipivo scanned the complete video but did not find {name}.\n\n"
-                "Try more varied references or a lower Match strictness setting.",
-            )
-            return
+    def _video_job_ranges(self, _entry_id: str, _character_id: str, _name: str, ranges: list[ClipRange]) -> None:
         # Earlier automatic results are replaced; clips you marked by hand stay.
         manual = [item for item in self.right_panel.ranges() if not item.origin.startswith("automatic")]
-        clips = sorted([*manual, *ranges], key=lambda item: item.start_ms)
-        self.right_panel.set_clips(clips)
-        self.right_panel.select_stitched_output()
+        self.right_panel.set_clips(sorted([*manual, *ranges], key=lambda item: item.start_ms))
         self._persist_ranges()
-        # Mark every appearance on the timeline without arming Find next.
         self.detected_appearances = []
         self._set_find_next_mode(False)
-        self.right_panel.set_find_next_available(False)
         self.timeline.detections = [item.start_ms for item in ranges]
         self.timeline.update()
-        self._activate_clip(ranges[0])
-        total_ms = sum(item.duration_ms for item in ranges)
-        summary = (
-            f"{len(ranges)} appearance{'s' if len(ranges) != 1 else ''} · "
-            f"{format_timecode(total_ms)} of {format_timecode(self.video_info.duration_ms)}"
-        )
-        self.right_panel.set_find_result(summary)
-        self.ready_text.setText(f"{name}: {summary}")
-        box = QMessageBox(self)
-        box.setWindowTitle("Clips ready")
-        box.setIcon(QMessageBox.Information)
-        box.setText(f"Found {name} {len(ranges)} time{'s' if len(ranges) != 1 else ''}.")
-        box.setInformativeText(
-            f"Together that is {format_timecode(total_ms)} of video. "
-            "Save them now as one stitched video, or review the clips on the right first."
-        )
-        save = box.addButton("Save stitched video", QMessageBox.AcceptRole)
-        box.addButton("Review first", QMessageBox.RejectRole)
-        box.setDefaultButton(save)
-        box.exec()
-        if box.clickedButton() is save:
-            self._request_export_selected_mode()
+        if ranges:
+            self._activate_clip(ranges[0])
+        self._thumbnail_queue = [item for item in ranges]
+        QTimer.singleShot(0, self._next_clip_thumbnail)
 
-    def _find_all_failed(self, detail: str) -> None:
-        self._finish_find_all_ui()
-        self.ready_text.setText("Character scan failed")
-        QMessageBox.critical(self, "Could not scan video", detail)
+    def _next_clip_thumbnail(self) -> None:
+        # One frame per tick keeps the window responsive while thumbnails fill in.
+        queue = getattr(self, "_thumbnail_queue", [])
+        if not queue or not self.controller:
+            return
+        clip = queue.pop(0)
+        if any(item.id == clip.id for item in self.right_panel.ranges()):
+            try:
+                pixmap = self._pixmap_for_decoded(self.controller.frame_at(clip.start_ms + min(500, clip.duration_ms // 2)))
+                self.right_panel.clip_model.thumbnails[clip.id] = pixmap
+                self.right_panel.clips_view.viewport().update()
+            except DecodeError:
+                pass
+        if queue:
+            QTimer.singleShot(15, self._next_clip_thumbnail)
 
-    def _find_all_cancelled(self) -> None:
-        self._finish_find_all_ui()
-        self.ready_text.setText("Character scan cancelled")
+    def _video_job_finished(self, cancelled: bool) -> None:
+        status, detail, outputs = self._job_result
+        name = self.current_target.name if self.current_target else "The person"
+        if cancelled or status == "cancelled":
+            self.video_job.show_finished("Cancelled. Nothing was saved.", success=False)
+            self.ready_text.setText("Cancelled")
+        elif status == "completed":
+            folder = str(Path(outputs[0]).parent) if outputs else ""
+            self.video_job.show_finished(detail, folder)
+            self.ready_text.setText(f"Saved · {name}")
+        elif status == "no_match":
+            self.video_job.show_finished(
+                f"{name} wasn't found. Try more varied photos, or lower Match strictness in Settings.", success=False
+            )
+            self.ready_text.setText(f"{name} not found")
+        else:
+            self.video_job.show_finished(f"Failed: {detail}", success=False)
+            self.ready_text.setText("Failed")
 
-    def _find_all_worker_finished(self, worker: FindAllWorker) -> None:
-        if self.find_all_worker is worker:
-            self.find_all_worker = None
+    def _video_job_stopped(self, worker: BatchExecutionWorker) -> None:
+        if self.job_worker is worker:
+            self.job_worker = None
         worker.deleteLater()
 
     def _find_worker_finished(self, worker: FindCharacterWorker) -> None:
@@ -1629,7 +1492,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "batch_page"):
             self.batch_page.set_match_threshold(threshold)
         self.search_face_engine = None
-        self.find_all_face_engine = None
+        self.wide_face_engine = None
         if self.face_engine:
             if hasattr(self.face_engine, "use_gpu"):
                 self.face_engine.use_gpu = use_gpu
@@ -1641,63 +1504,49 @@ class MainWindow(QMainWindow):
 
     def _export_settings_changed(self, video_encoder: str) -> None:
         self.export_video_encoder = video_encoder if video_encoder in {"auto", "nvenc", "cpu"} else "auto"
+        if hasattr(self, "batch_page"):
+            self.batch_page.set_video_encoder(self.export_video_encoder)
+
+    def _save_clips(self) -> None:
+        values = self.video_job.values()
+        self._request_export(values["mode"], values["arrangement"] == "compilation", values["include_audio"])
 
     def _request_export(self, mode: str, stitched: bool = False, include_audio: bool = True) -> None:
-        if not self.video_info:
+        if not self.video_info or self._video_job_running():
             return
         clips = self._enabled_clips_for_export()
         if not clips:
             if self.right_panel.ranges():
-                message = "Enable at least one clip in the clip list before exporting."
+                message = "Tick at least one clip in the list first."
             else:
-                message = "Set a valid A and B selection before exporting."
+                message = "Press Start to find clips, or set A and B to mark one yourself."
             QMessageBox.information(self, "No clips", message)
             return
         if mode == "copy" and any(not self._is_keyframe(clip.start_ms) for clip in clips):
             answer = QMessageBox.warning(
                 self,
-                "Copy boundaries are not exact",
-                "One or more clip starts are not on source keyframes. Source copy preserves quality, but the visible start can shift to a nearby keyframe. Use Exact cut / MP4 for exact A/B boundaries.\n\nContinue with source copy?",
+                "Fast copy can shift clip starts",
+                "Some clips don't start on a keyframe, so fast copy may start them a little early. "
+                "Exact cut follows the frames precisely.\n\nSave with fast copy anyway?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
                 return
-
-        target: Path | None = None
-        if stitched or len(clips) == 1:
-            filename = choose_save_file(
-                self,
-                "Save exported video",
-                f"{self.video_info.path.stem}_{date_tag()}.mp4",
-                key="export_folder",
-                preferred_start=self.video_info.path.parent,
-            )
-            if not filename:
-                return
-            target = Path(filename)
-            output_dir = target.parent
+        values = self.video_job.values()
+        if values["save_next_to_source"]:
+            output_dir = self.video_info.path.parent
+        elif values["output_dir"]:
+            output_dir = Path(values["output_dir"])
         else:
-            output = choose_directory(
-                self,
-                "Choose export folder",
-                key="export_folder",
-                preferred_start=self.video_info.path.parent,
-            )
-            if not output:
+            folder = choose_directory(self, "Save clips to", key="export_folder", preferred_start=self.video_info.path.parent)
+            if not folder:
                 return
-            output_dir = Path(output)
-        self._start_export(output_dir, mode, stitched, include_audio, target)
+            output_dir = Path(folder)
+        self._start_export(output_dir, mode, stitched, include_audio, None)
 
     def _request_export_selected_mode(self) -> None:
-        if not hasattr(self, "right_panel"):
-            self._request_export("copy", False, True)
-            return
-        self._request_export(
-            str(self.right_panel.output.currentData()),
-            self.right_panel.arrangement.currentData() == "stitched",
-            self.right_panel.include_audio.isChecked(),
-        )
+        self._save_clips()
 
     def _enabled_clips_for_export(self) -> list[ClipRange]:
         clips = [item for item in self.right_panel.ranges() if item.enabled]
@@ -1715,6 +1564,7 @@ class MainWindow(QMainWindow):
         include_audio: bool,
         target: Path | None = None,
     ) -> None:
+        person = self.current_target.name if self.current_target and self.current_target.scope == "persistent" else ""
         self.export_worker = ExportWorker(
             self.video_info.path,
             self.right_panel.ranges(),
@@ -1727,34 +1577,29 @@ class MainWindow(QMainWindow):
             self.video_info.fps,
             self.export_video_encoder,
             self,
+            output_character=person,
         )
-        self.export_progress = QProgressDialog("Preparing export…", "Cancel", 0, 1, self)
-        self.export_progress.setWindowTitle("Exporting clips")
-        self.export_progress.setWindowModality(Qt.WindowModal)
-        self.export_progress.setMinimumDuration(0)
-        self.export_progress.canceled.connect(self.export_worker.cancel)
+        self.video_job.set_running(True)
+        self.video_job.show_progress(0, "Saving clips…")
         self.export_worker.progressed.connect(self._export_progressed)
         self.export_worker.succeeded.connect(self._export_succeeded)
         self.export_worker.failed.connect(self._export_failed)
         self.export_worker.start()
 
     def _export_progressed(self, done: int, total: int, text: str) -> None:
-        if self.export_progress:
-            self.export_progress.setMaximum(max(1, total))
-            self.export_progress.setValue(done)
-            self.export_progress.setLabelText(text)
+        self.video_job.show_progress(round(done / max(1, total) * 100), text)
 
     def _export_succeeded(self, outputs: list[Path]) -> None:
-        if self.export_progress:
-            self.export_progress.close()
-        self.ready_text.setText("Export complete")
-        QMessageBox.information(self, "Export complete", f"Created {len(outputs)} file(s) in:\n{outputs[0].parent}")
+        folder = str(outputs[0].parent) if outputs else ""
+        self.ready_text.setText("Saved")
+        self.video_job.show_finished(f"Saved {len(outputs)} file{'s' if len(outputs) != 1 else ''}", folder)
 
     def _export_failed(self, detail: str) -> None:
-        if self.export_progress:
-            self.export_progress.close()
-        self.ready_text.setText("Export failed")
-        QMessageBox.critical(self, "Export failed", detail + "\n\nSee clipivo-export.log in the selected output folder.")
+        self.ready_text.setText("Save failed")
+        cancelled = "cancel" in detail.lower()
+        self.video_job.show_finished(
+            "Cancelled. Nothing was saved." if cancelled else f"Save failed: {detail}", success=False
+        )
 
     def _is_keyframe(self, milliseconds: int) -> bool:
         return bool(self.video_info and any(abs(value - milliseconds) <= 2 for value in self.video_info.keyframes_ms))
@@ -1848,9 +1693,9 @@ class MainWindow(QMainWindow):
         if self.find_worker and self.find_worker.isRunning():
             self.find_worker.cancel()
             self.find_worker.wait(5000)
-        if self.find_all_worker and self.find_all_worker.isRunning():
-            self.find_all_worker.cancel()
-            self.find_all_worker.wait(5000)
+        if self.job_worker and self.job_worker.isRunning():
+            self.job_worker.cancel()
+            self.job_worker.wait(5000)
         if self.probe_worker and self.probe_worker.isRunning():
             self.probe_worker.wait(5000)
         super().closeEvent(event)

@@ -72,16 +72,18 @@ class PhaseOneCharacterTests(unittest.TestCase):
 
     def test_selected_target_enables_first_appearance_search(self) -> None:
         character = self.store.create_character("Jordan")
+        self.store.add_reference(character.id, "jordan.jpg", b"jordan")
         source = self.root / "find-target.mp4"
         source.write_bytes(b"video")
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "data")}):
             window = MainWindow(Path(__file__).resolve().parents[1], self.store, FakeEngine())
             try:
                 window.video_info = type("Info", (), {"path": source})()
-                window._set_current_target(character, persist=False)
+                window.video_job.refresh_people()
+                window.video_job.select_person(character.id)
+                window._job_person_changed(persist=False)
+                self.assertEqual(window.current_target.id, character.id)
                 self.assertTrue(window.actions["find_character"].isEnabled())
-                self.assertTrue(window.right_panel.find_character_button.isEnabled())
-                self.assertIn("complete video", window.right_panel.find_character_button.toolTip())
             finally:
                 window.close()
 
@@ -153,35 +155,41 @@ class PhaseOneCharacterTests(unittest.TestCase):
             self.assertIsNone(load_find_result(source, "alex", "refs-v2", 0.40))
             self.assertIsNone(load_find_result(source, "alex", "refs-v1", 0.45))
 
-    def test_people_page_selects_and_persists_a_reusable_target(self) -> None:
+    def test_picking_a_saved_person_is_remembered_for_the_video(self) -> None:
         character = self.store.create_character("Jordan")
+        self.store.add_reference(character.id, "jordan.jpg", b"jordan")
         source = self.root / "video.mp4"
         source.write_bytes(b"video")
         with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "data")}):
             window = MainWindow(Path(__file__).resolve().parents[1], self.store, FakeEngine())
             try:
                 window.video_info = type("Info", (), {"path": source})()
-                window.people_page.set_video_context(project_id(source), source.name, character.id)
-                window.people_page._activate_target()
+                window.video_job.refresh_people()
+                window.video_job.select_person(character.id)
+                window._clear_current_target()
+                window._job_person_changed(persist=True)
                 self.assertEqual(window.current_target.id, character.id)
-                self.assertIn("Jordan", window.right_panel.target_title.text())
                 self.assertEqual(load_target_selection(source)["character_id"], character.id)
             finally:
                 window.close()
 
-    def test_adhoc_target_is_only_offered_for_its_video(self) -> None:
-        adhoc = self.store.create_character("One-off guest", scope="adhoc", project_id="video-one")
-        window = MainWindow(Path(__file__).resolve().parents[1], self.store, FakeEngine())
-        try:
-            window.people_page.set_video_context("video-one", "one.mp4", adhoc.id)
-            self.assertEqual(window.people_page.selected_character().id, adhoc.id)
-            window.people_page.set_video_context("video-two", "two.mp4", adhoc.id)
-            self.assertNotEqual(
-                getattr(window.people_page.selected_character(), "id", ""),
-                adhoc.id,
-            )
-        finally:
-            window.close()
+    def test_one_time_person_is_never_saved(self) -> None:
+        legacy = self.store.create_character("Old ad-hoc", scope="adhoc", project_id="video-one")
+        source = self.root / "video.mp4"
+        source.write_bytes(b"video")
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.root / "data")}):
+            window = MainWindow(Path(__file__).resolve().parents[1], self.store, FakeEngine())
+            try:
+                names = [window.video_job.person_combo.itemText(row) for row in range(window.video_job.person_combo.count())]
+                self.assertFalse(any("Old ad-hoc" in name for name in names))
+                window.video_info = type("Info", (), {"path": source})()
+                window.one_time_person.add([("face.png", b"face")])
+                self.assertEqual(window.current_target.scope, "session")
+                self.assertEqual(load_target_selection(source), {})
+                self.assertEqual(len(self.store.characters()), 0)
+                self.assertIsNotNone(self.store.character(legacy.id))
+            finally:
+                window.close()
 
     def test_version_and_lwl_branding_are_visible(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1], self.store, FakeEngine())

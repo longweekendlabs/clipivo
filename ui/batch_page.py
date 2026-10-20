@@ -5,16 +5,9 @@ from threading import Event
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
-    QFormLayout,
-    QGroupBox,
-    QHeaderView,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -29,7 +22,6 @@ from core.batch import (
     BatchCharacterTarget,
     BatchConfiguration,
     BatchVideoEntry,
-    CharacterAppearances,
     analyse_video_for_characters,
     discover_videos,
     load_batch_configuration,
@@ -40,16 +32,20 @@ from core.batch import (
 from core.character_store import CharacterStore
 from core.export import ExportError, export_ranges
 from core.face_engine import FaceEngine
+from core.filters import VideoFilter
 from core.models import ClipRange
+from core.timecode import format_duration
 from core.video_probe import probe_video
 
+from .job_panel import JobPanel, OneTimePerson
 from .native_dialogs import choose_directory, choose_videos
-from .styles import PALETTE
 
 
 class BatchExecutionWorker(QThread):
+    """Analyse and export queued videos. Used by Batch and, with one entry, by the Video tab's Start."""
+
     entryUpdated = Signal(str, str, int, str, object)
-    reviewRequired = Signal(str, str, str, str, object)
+    rangesFound = Signal(str, str, str, object)
     allFinished = Signal(bool)
 
     def __init__(
@@ -58,16 +54,18 @@ class BatchExecutionWorker(QThread):
         targets: list[BatchCharacterTarget],
         face_engine: FaceEngine,
         parent=None,
+        *,
+        filters: list[VideoFilter] | None = None,
     ):
         super().__init__(parent)
         self.configuration = BatchConfiguration.from_dict(configuration.to_dict())
+        self.configuration.save_next_to_source = configuration.save_next_to_source
         self.targets = targets
         self.face_engine = face_engine
+        self.filters = [VideoFilter.from_dict(item.to_dict()) for item in (filters or [])]
         self._pause_event = Event()
         self._pause_event.set()
         self._cancel_event = Event()
-        self._review_event = Event()
-        self._review_ranges: list[ClipRange] | None = None
 
     def set_paused(self, paused: bool) -> None:
         if paused:
@@ -79,11 +77,6 @@ class BatchExecutionWorker(QThread):
         self._cancel_event.set()
         self.requestInterruption()
         self._pause_event.set()
-        self._review_event.set()
-
-    def approve_review(self, ranges: list[ClipRange]) -> None:
-        self._review_ranges = [ClipRange.from_dict(item.to_dict()) for item in ranges if item.enabled]
-        self._review_event.set()
 
     def run(self) -> None:
         cancelled = False
@@ -95,15 +88,9 @@ class BatchExecutionWorker(QThread):
                 break
             try:
                 self._process_entry(entry)
-            except ExportError as exc:
-                if self._cancelled():
-                    self.entryUpdated.emit(entry.id, "cancelled", entry.progress, "Cancelled", [])
-                    cancelled = True
-                    break
-                self.entryUpdated.emit(entry.id, "failed", entry.progress, str(exc), [])
             except Exception as exc:  # noqa: BLE001
                 if self._cancelled():
-                    self.entryUpdated.emit(entry.id, "cancelled", entry.progress, "Cancelled", [])
+                    self.entryUpdated.emit(entry.id, "cancelled", entry.progress, "Cancelled · nothing was changed", [])
                     cancelled = True
                     break
                 self.entryUpdated.emit(entry.id, "failed", entry.progress, str(exc), [])
@@ -113,76 +100,75 @@ class BatchExecutionWorker(QThread):
         source = entry.path
         if not source.is_file():
             raise RuntimeError(f"Source file is missing: {source}")
-        self.entryUpdated.emit(entry.id, "analysing", 1, "Reading video", [])
+        self.entryUpdated.emit(entry.id, "analysing", 1, "Reading video…", [])
         info = probe_video(source, include_keyframes=False)
         results = analyse_video_for_characters(
             source,
             self.face_engine,
             self.targets,
             duration_ms=info.duration_ms,
-            quality=self.configuration.quality,
             cancelled=self._cancelled,
             wait_if_paused=self._wait_if_paused,
-            progress=lambda current, total, label: self.entryUpdated.emit(
+            progress=lambda current, total, _label: self.entryUpdated.emit(
                 entry.id,
                 "analysing",
                 min(70, round(current / max(1, total) * 70)),
-                label,
+                f"Scanning {format_duration(current)} / {format_duration(total)}",
                 [],
+            ),
+            refine_progress=lambda done, total: self.entryUpdated.emit(
+                entry.id, "analysing", 70, f"Tightening clip edges {done + 1} of {total}", [],
             ),
         )
         if self._cancelled():
-            raise ExportError("Batch cancelled.")
+            raise ExportError("Cancelled.")
+        for result in results:
+            self.rangesFound.emit(
+                entry.id, result.character_id, result.character_name,
+                [ClipRange.from_dict(item.to_dict()) for item in result.ranges],
+            )
 
         outputs: list[Path] = []
-        missing_characters: list[str] = []
         exportable = [result for result in results if result.ranges]
-        missing_characters.extend(result.character_name for result in results if not result.ranges)
+        missing = [result.character_name for result in results if not result.ranges]
         if not exportable:
-            self.entryUpdated.emit(
-                entry.id, "no_match", 100,
-                "No selected character was found · source kept", [],
-            )
+            self.entryUpdated.emit(entry.id, "no_match", 100, "Nobody found · source kept", [])
             return
 
-        for character_index, result in enumerate(exportable):
+        stitched = self.configuration.arrangement == "compilation"
+        output_dir = self.configuration.output_dir_for(source)
+        found_ms = 0
+        for index, result in enumerate(exportable):
             ranges = list(result.ranges)
-            if entry.manual_review:
-                ranges = self._request_review(entry, result, ranges)
-                if not ranges:
-                    missing_characters.append(result.character_name)
-                    continue
+            found_ms += sum(item.duration_ms for item in ranges)
             if self._cancelled():
-                raise ExportError("Batch cancelled.")
-            output_dir = Path(self.configuration.output_dir)
+                raise ExportError("Cancelled.")
             output_dir.mkdir(parents=True, exist_ok=True)
-            base_progress = 70 + round(character_index / max(1, len(exportable)) * 25)
-            span = max(1, round(25 / max(1, len(exportable))))
+            base = 70 + round(index / len(exportable) * 25)
+            span = max(1, round(25 / len(exportable)))
             character_outputs = export_ranges(
                 source,
                 ranges,
                 output_dir,
-                "accurate",
-                self.configuration.arrangement == "compilation",
+                self.configuration.mode,
+                stitched,
                 include_audio=self.configuration.include_audio,
-                progress=lambda done, total, text, base=base_progress, width=span: self.entryUpdated.emit(
+                progress=lambda done, total, _text, base=base, width=span, name=result.character_name: self.entryUpdated.emit(
                     entry.id,
                     "exporting",
                     min(95, base + round(done / max(1, total) * width)),
-                    f"{result.character_name} · {text}",
+                    f"Saving {name} · {done} of {total}",
                     [str(path) for path in outputs],
                 ),
                 cancel_event=self._cancel_event,
+                filters=self.filters,
                 source_fps=info.fps,
                 video_encoder=self.configuration.video_encoder,
-                output_character=result.character_name,
+                output_character="" if result.character_id == OneTimePerson.ID else result.character_name,
                 source_video_bitrate_kbps=getattr(info, "video_bitrate_kbps", 0),
             )
-            if self.configuration.arrangement == "compilation":
-                expected_durations = [sum(item.duration_ms for item in ranges)]
-            else:
-                expected_durations = [item.duration_ms for item in ranges]
-            for output, expected_duration in zip(character_outputs, expected_durations, strict=True):
+            expected = [sum(item.duration_ms for item in ranges)] if stitched else [item.duration_ms for item in ranges]
+            for output, expected_duration in zip(character_outputs, expected, strict=True):
                 try:
                     validate_export(output, expected_duration_ms=expected_duration)
                 except Exception:
@@ -190,39 +176,15 @@ class BatchExecutionWorker(QThread):
                     raise
             outputs.extend(character_outputs)
 
-        if not outputs:
-            self.entryUpdated.emit(entry.id, "no_match", 100, "No reviewed ranges to export · source kept", [])
-            return
-
-        detail = f"Completed · {len(outputs)} output{'s' if len(outputs) != 1 else ''}"
-        all_requested_succeeded = not missing_characters
-        if missing_characters:
-            detail += f" · no match: {', '.join(missing_characters)} · source kept"
-        if self.configuration.trash_after_success and all_requested_succeeded:
-            self.entryUpdated.emit(entry.id, "exporting", 98, "Outputs verified · moving source to Trash", [str(path) for path in outputs])
+        clips = sum(len(result.ranges) for result in exportable)
+        detail = f"Done · {clips} clip{'s' if clips != 1 else ''} · {format_duration(found_ms)}"
+        if missing:
+            detail += f" · not found: {', '.join(missing)} · source kept"
+        if self.configuration.trash_after_success and not missing:
+            self.entryUpdated.emit(entry.id, "exporting", 98, "Saved and checked · moving source to Trash", [str(path) for path in outputs])
             move_source_to_trash(source)
             detail += " · source moved to Trash"
         self.entryUpdated.emit(entry.id, "completed", 100, detail, [str(path) for path in outputs])
-
-    def _request_review(
-        self,
-        entry: BatchVideoEntry,
-        result: CharacterAppearances,
-        ranges: list[ClipRange],
-    ) -> list[ClipRange]:
-        self._review_ranges = None
-        self._review_event.clear()
-        self.reviewRequired.emit(
-            entry.id,
-            entry.source,
-            result.character_id,
-            result.character_name,
-            [ClipRange.from_dict(item.to_dict()) for item in ranges],
-        )
-        while not self._review_event.wait(0.1):
-            if self._cancelled():
-                return []
-        return self._review_ranges or []
 
     def _wait_if_paused(self) -> bool:
         while not self._pause_event.wait(0.1):
@@ -236,8 +198,6 @@ class BatchExecutionWorker(QThread):
 
 class BatchPage(QWidget):
     openVideoRequested = Signal(object)
-    reviewRequested = Signal(object, str, str, object)
-    approveReviewRequested = Signal(object, str)
     runningChanged = Signal(bool)
 
     def __init__(
@@ -245,23 +205,29 @@ class BatchPage(QWidget):
         character_store: CharacterStore | None,
         face_engine: FaceEngine | None,
         parent=None,
+        *,
+        one_time: OneTimePerson | None = None,
     ):
         super().__init__(parent)
         self.character_store = character_store
         self.face_engine = face_engine
+        self.one_time = one_time or OneTimePerson(self)
         self.configuration = load_batch_configuration()
         self.worker: BatchExecutionWorker | None = None
         self.match_threshold = 0.40
+        self.video_encoder = "auto"
+        self.busy_elsewhere = lambda: False
         self._paused = False
         self._foreground_busy = False
-        self._review_entry_id = ""
-        self._review_source: Path | None = None
-        self._review_character_id = ""
         self._building = True
         self._build_ui()
         self._populate_queue()
-        self.refresh_characters()
-        self._load_configuration_controls()
+        self.job.set_values(self.configuration.to_dict())
+        self.job.refresh_people()
+        for row in range(self.job.people_list.count()):
+            item = self.job.people_list.item(row)
+            if item.data(Qt.UserRole).id in self.configuration.character_ids:
+                item.setCheckState(Qt.Checked)
         self._building = False
         self._update_actions()
 
@@ -275,17 +241,14 @@ class BatchPage(QWidget):
         title_box.setSpacing(1)
         title = QLabel("Batch")
         title.setObjectName("pageTitle")
-        title.setToolTip("Process one or many videos in the background")
-        subtitle = QLabel("Queue videos, select characters, review when needed, and export every appearance.")
+        subtitle = QLabel("Add videos, pick who to find, then Start. Clipivo works through the list on its own.")
         subtitle.setObjectName("pageSubtitle")
-        subtitle.setToolTip("Each source is decoded once for all selected reusable characters")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         heading.addLayout(title_box)
         heading.addStretch()
-        self.summary = QLabel("0 videos · 0 selected characters")
+        self.summary = QLabel("0 videos")
         self.summary.setObjectName("batchSummary")
-        self.summary.setToolTip("Current enabled batch size")
         heading.addWidget(self.summary)
         root.addLayout(heading)
 
@@ -300,177 +263,91 @@ class BatchPage(QWidget):
         queue_layout.setSpacing(4)
         tools = QHBoxLayout()
         self.add_videos_button = QPushButton("Add videos")
-        self.add_videos_button.setToolTip("Add one or more supported video files to the queue")
         self.add_videos_button.clicked.connect(self._choose_videos)
         self.add_folder_button = QPushButton("Add folder")
-        self.add_folder_button.setToolTip("Recursively add supported videos from a folder")
+        self.add_folder_button.setToolTip("Add every video in a folder and its subfolders")
         self.add_folder_button.clicked.connect(self._choose_folder)
         self.remove_button = QPushButton("Remove")
-        self.remove_button.setToolTip("Remove selected queue rows without touching source files")
+        self.remove_button.setToolTip("Take the selected videos off the list; files are not touched")
         self.remove_button.clicked.connect(self._remove_selected)
+        self.clear_done_button = QPushButton("Clear finished")
+        self.clear_done_button.setToolTip("Take finished videos off the list")
+        self.clear_done_button.clicked.connect(self._clear_finished)
         self.open_editor_button = QPushButton("Open in editor")
-        self.open_editor_button.setToolTip("Open the selected source in the Video tab for manual work")
+        self.open_editor_button.setToolTip("Open the selected video in the Video tab")
         self.open_editor_button.clicked.connect(self._open_selected)
-        for button in (self.add_videos_button, self.add_folder_button, self.remove_button, self.open_editor_button):
+        for button in (self.add_videos_button, self.add_folder_button, self.remove_button, self.clear_done_button, self.open_editor_button):
             tools.addWidget(button)
         tools.addStretch()
         queue_layout.addLayout(tools)
 
-        self.queue = QTableWidget(0, 5)
+        self.queue = QTableWidget(0, 4)
         self.queue.setObjectName("batchQueue")
-        self.queue.setHorizontalHeaderLabels(("Run", "Video", "Review", "Status", "Progress"))
+        self.queue.setHorizontalHeaderLabels(("Run", "Video", "Status", "Progress"))
         self.queue.verticalHeader().hide()
         self.queue.setSelectionBehavior(QTableWidget.SelectRows)
         self.queue.setSelectionMode(QTableWidget.ExtendedSelection)
         self.queue.setAlternatingRowColors(True)
-        self.queue.setToolTip("Double-click a video to open it in the manual editor")
-        self.queue.horizontalHeader().setStretchLastSection(False)
+        self.queue.setToolTip("Double-click a video to open it in the Video tab")
         self.queue.horizontalHeader().resizeSection(0, 42)
-        self.queue.horizontalHeader().resizeSection(2, 62)
-        self.queue.horizontalHeader().resizeSection(3, 260)
-        self.queue.horizontalHeader().resizeSection(4, 120)
+        self.queue.horizontalHeader().resizeSection(2, 300)
+        self.queue.horizontalHeader().resizeSection(3, 120)
         self.queue.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.queue.itemChanged.connect(self._queue_item_changed)
         self.queue.itemDoubleClicked.connect(lambda _item: self._open_selected())
         self.queue.itemSelectionChanged.connect(self._update_actions)
         queue_layout.addWidget(self.queue, 1)
+        self.empty_hint = QLabel("Add videos or a folder to begin.")
+        self.empty_hint.setObjectName("pageSubtitle")
+        self.empty_hint.setAlignment(Qt.AlignCenter)
+        queue_layout.addWidget(self.empty_hint)
         splitter.addWidget(queue_panel)
 
         config_panel = QWidget()
         config_panel.setObjectName("batchInspector")
-        config_panel.setMinimumWidth(320)
-        config_panel.setMaximumWidth(370)
+        config_panel.setMinimumWidth(300)
+        config_panel.setMaximumWidth(360)
         config_layout = QVBoxLayout(config_panel)
-        config_layout.setContentsMargins(8, 0, 0, 0)
-        config_layout.setSpacing(5)
-
-        characters = QGroupBox("Characters")
-        characters.setToolTip("Select one or more reusable characters for every enabled video")
-        characters_layout = QVBoxLayout(characters)
-        characters_layout.setContentsMargins(7, 6, 7, 7)
-        self.characters = QListWidget()
-        self.characters.setObjectName("batchCharacters")
-        self.characters.setMinimumHeight(130)
-        self.characters.setToolTip("Checked characters are matched in one shared video decode pass")
-        self.characters.itemChanged.connect(self._configuration_changed)
-        characters_layout.addWidget(self.characters)
-        config_layout.addWidget(characters, 1)
-
-        output = QGroupBox("Output")
-        output.setToolTip("Configure generated video files")
-        form = QFormLayout(output)
-        form.setContentsMargins(7, 7, 7, 7)
-        form.setSpacing(5)
-        folder_row = QWidget()
-        folder_layout = QHBoxLayout(folder_row)
-        folder_layout.setContentsMargins(0, 0, 0, 0)
-        folder_layout.setSpacing(4)
-        self.output_folder = QLineEdit()
-        self.output_folder.setReadOnly(True)
-        self.output_folder.setPlaceholderText("Choose an output folder")
-        self.output_folder.setToolTip("All generated clips are written here")
-        browse = QPushButton("Browse")
-        browse.setToolTip("Choose the batch output folder")
-        browse.clicked.connect(self._choose_output_folder)
-        folder_layout.addWidget(self.output_folder, 1)
-        folder_layout.addWidget(browse)
-        form.addRow("Folder", folder_row)
-
-        self.arrangement = QComboBox()
-        self.arrangement.addItem("One compilation per video + character", "compilation")
-        self.arrangement.addItem("Separate appearance clips", "separate")
-        self.arrangement.setToolTip("Choose one stitched reel or individual clips for each character")
-        form.addRow("Save as", self.arrangement)
-        self.quality = QComboBox()
-        self.quality.addItem("Balanced · reference frames / 2 s", "balanced")
-        self.quality.addItem("Rapid · keyframes only", "rapid")
-        self.quality.addItem("Thorough · sampled / 0.75 s", "thorough")
-        self.quality.setToolTip("Balanced is the default; Rapid is faster but can miss very short appearances")
-        form.addRow("Analysis", self.quality)
-        self.encoder = QComboBox()
-        self.encoder.addItem("Auto · NVIDIA when available", "auto")
-        self.encoder.addItem("NVIDIA NVENC", "nvenc")
-        self.encoder.addItem("CPU · libx264", "cpu")
-        self.encoder.setToolTip("Encoder used for exact automatic appearance exports")
-        form.addRow("Encoder", self.encoder)
-        self.include_audio = QCheckBox("Include audio")
-        self.include_audio.setToolTip("Preserve synchronized audio in generated outputs")
-        form.addRow("", self.include_audio)
-        config_layout.addWidget(output)
-
-        safety = QGroupBox("After success")
-        safety.setToolTip("Optional source cleanup after every requested output validates")
-        safety_layout = QVBoxLayout(safety)
-        safety_layout.setContentsMargins(7, 6, 7, 7)
-        self.trash_source = QCheckBox("Move source to Trash")
-        self.trash_source.setToolTip(
-            "Off by default; only moves a source to Linux Trash after every requested character output succeeds and validates"
+        config_layout.setContentsMargins(8, 2, 2, 2)
+        self.job = JobPanel(
+            self.character_store,
+            self.face_engine,
+            self.one_time,
+            multiple=True,
+            settings_key="batch_job",
+            start_text="Start batch",
+            show_trash=True,
+            show_pause=True,
         )
-        safety_layout.addWidget(self.trash_source)
-        safety_hint = QLabel("Never runs after no-match, failure, cancellation, or pending review.")
-        safety_hint.setObjectName("targetHint")
-        safety_hint.setWordWrap(True)
-        safety_hint.setToolTip("Clipivo never permanently deletes source videos")
-        safety_layout.addWidget(safety_hint)
-        config_layout.addWidget(safety)
-
-        self.review_banner = QLabel("Manual review is waiting. Adjust A/B clips in Video, then approve here.")
-        self.review_banner.setObjectName("warningBanner")
-        self.review_banner.setWordWrap(True)
-        self.review_banner.setToolTip("The background queue is paused until reviewed ranges are approved")
-        self.review_banner.hide()
-        config_layout.addWidget(self.review_banner)
-        self.approve_button = QPushButton("Approve reviewed clips")
-        self.approve_button.setObjectName("targetAction")
-        self.approve_button.setToolTip("Continue batch export with the currently reviewed A/B clip list")
-        self.approve_button.clicked.connect(self._approve_review)
-        self.approve_button.hide()
-        config_layout.addWidget(self.approve_button)
-
-        run_row = QHBoxLayout()
-        self.start_button = QPushButton("Start batch")
-        self.start_button.setObjectName("primary")
-        self.start_button.setToolTip("Analyse and export all enabled queue entries")
-        self.start_button.clicked.connect(self._start)
-        self.pause_button = QPushButton("Pause")
-        self.pause_button.setToolTip("Pause face analysis between decoded samples")
-        self.pause_button.clicked.connect(self._toggle_pause)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setToolTip("Cancel analysis/export safely; source videos remain untouched")
-        self.cancel_button.clicked.connect(self._cancel)
-        run_row.addWidget(self.start_button, 1)
-        run_row.addWidget(self.pause_button)
-        run_row.addWidget(self.cancel_button)
-        config_layout.addLayout(run_row)
+        self.job.startRequested.connect(self._start)
+        self.job.cancelRequested.connect(self._cancel)
+        self.job.pauseRequested.connect(self._toggle_pause)
+        self.job.settingsChanged.connect(self._configuration_changed)
+        self.job.selectionChanged.connect(self._configuration_changed)
+        config_layout.addWidget(self.job)
+        config_layout.addStretch()
         splitter.addWidget(config_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([900, 340])
+        splitter.setSizes([900, 330])
 
-        for widget in (self.arrangement, self.quality, self.encoder, self.include_audio, self.trash_source):
-            if isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self._configuration_changed)
-            else:
-                widget.toggled.connect(self._configuration_changed)
+    # Compatibility helpers used by the main window and tests.
+    @property
+    def trash_source(self):
+        return self.job.trash_source
+
+    @property
+    def characters(self):
+        return self.job.people_list
 
     def refresh_characters(self) -> None:
-        selected = set(self._selected_character_ids()) if hasattr(self, "characters") else set(self.configuration.character_ids)
-        self.characters.blockSignals(True)
-        self.characters.clear()
-        if self.character_store:
-            for character in self.character_store.characters():
-                item = QListWidgetItem(character.name)
-                item.setData(Qt.UserRole, character.id)
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked if character.id in selected else Qt.Unchecked)
-                references = len(self.character_store.references(character.id))
-                item.setToolTip(f"{character.name} · {references} encrypted reference photo{'s' if references != 1 else ''}")
-                self.characters.addItem(item)
-        self.characters.blockSignals(False)
-        self._update_summary()
+        self.job.refresh_people()
 
     def set_match_threshold(self, threshold: float) -> None:
         self.match_threshold = max(0.0, min(1.0, float(threshold)))
+
+    def set_video_encoder(self, encoder: str) -> None:
+        self.video_encoder = encoder
 
     def add_paths(self, paths: list[Path]) -> None:
         known = {str(Path(entry.source).resolve()) for entry in self.configuration.videos}
@@ -489,23 +366,13 @@ class BatchPage(QWidget):
             self._populate_queue()
             self._persist()
 
-    def approve_review(self, ranges: list[ClipRange]) -> None:
-        if self.worker and self._review_entry_id:
-            self.worker.approve_review(ranges)
-            self.review_banner.hide()
-            self.approve_button.hide()
-            self._review_entry_id = ""
-            self._review_source = None
-            self._review_character_id = ""
-
     def set_foreground_busy(self, busy: bool) -> None:
         self._foreground_busy = bool(busy)
-        if self.worker and self.worker.isRunning() and not self._review_entry_id:
+        if self.worker and self.worker.isRunning():
             self.worker.set_paused(self._paused or self._foreground_busy)
-            if self._foreground_busy:
-                self.pause_button.setText("Paused for editor")
-            else:
-                self.pause_button.setText("Resume" if self._paused else "Pause")
+
+    def is_running(self) -> bool:
+        return bool(self.worker and self.worker.isRunning())
 
     def _choose_videos(self) -> None:
         self.add_paths([Path(path) for path in choose_videos(self)])
@@ -514,12 +381,6 @@ class BatchPage(QWidget):
         folder = choose_directory(self, "Add videos from folder", key="batch_source_folder")
         if folder:
             self.add_paths(discover_videos(Path(folder)))
-
-    def _choose_output_folder(self) -> None:
-        folder = choose_directory(self, "Choose batch output folder", key="batch_output_folder")
-        if folder:
-            self.output_folder.setText(folder)
-            self._configuration_changed()
 
     def _remove_selected(self) -> None:
         selected_ids = {
@@ -532,139 +393,131 @@ class BatchPage(QWidget):
         self._populate_queue()
         self._persist()
 
+    def _clear_finished(self) -> None:
+        self.configuration.videos = [
+            entry for entry in self.configuration.videos if entry.status not in {"completed", "no_match"}
+        ]
+        self._populate_queue()
+        self._persist()
+
     def _open_selected(self) -> None:
-        row = self.queue.currentRow()
-        if row < 0:
-            return
-        entry = self._entry_for_row(row)
+        entry = self._entry_for_row(self.queue.currentRow())
         if entry:
             self.openVideoRequested.emit(entry.path)
 
+    def _targets(self) -> list[BatchCharacterTarget] | None:
+        targets: list[BatchCharacterTarget] = []
+        for person in self.job.selected_people():
+            references = self.job.references_for(person)
+            if not references:
+                QMessageBox.information(self, "No photos", f"{person.name} has no photos yet.")
+                return None
+            targets.append(BatchCharacterTarget(person.id, person.name, references, self.match_threshold))
+        return targets
+
     def _start(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self.is_running():
+            return
+        if self.busy_elsewhere():
+            QMessageBox.information(self, "Clipivo is busy", "Wait for the Video tab job to finish, or cancel it, first.")
             return
         self._sync_configuration()
-        entries = [entry for entry in self.configuration.videos if entry.enabled]
-        selected_ids = self._selected_character_ids()
+        entries = [entry for entry in self.configuration.videos if entry.enabled and entry.status != "completed"]
         if not entries:
-            QMessageBox.information(self, "Empty batch", "Add and enable at least one source video.")
+            QMessageBox.information(self, "Nothing to do", "Add videos first. Finished videos are skipped.")
             return
-        if not selected_ids:
-            QMessageBox.information(self, "No characters", "Select at least one reusable character.")
+        if not self.job.selected_people():
+            QMessageBox.information(self, "Who should Clipivo find?", "Tick a saved person, or add photos of a one-time person.")
             return
-        if not self.output_folder.text():
-            self._choose_output_folder()
-            if not self.output_folder.text():
-                return
-            self._sync_configuration()
         if not self.character_store or not self.face_engine:
-            QMessageBox.critical(self, "Batch unavailable", "The local character store or face engine is unavailable.")
+            QMessageBox.critical(self, "Batch unavailable", "The local face engine or character store is unavailable.")
             return
-        targets: list[BatchCharacterTarget] = []
-        for character_id in selected_ids:
-            character = self.character_store.character(character_id)
-            references = list(self.character_store.iter_reference_bytes(character_id))
-            if not character or not references:
-                QMessageBox.information(self, "Missing references", "Every selected character needs at least one reference photo.")
-                return
-            targets.append(BatchCharacterTarget(
-                character.id,
-                character.name,
-                references,
-                self.match_threshold,
-            ))
-        if self.configuration.trash_after_success:
-            answer = QMessageBox.warning(
-                self,
-                "Move successful sources to Trash?",
-                "After every requested character output succeeds and validates, Clipivo will move that source video to the Linux Trash. It will never permanently delete it.\n\nContinue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                return
-        for entry in entries:
-            entry.status = "queued"
-            entry.progress = 0
-            entry.detail = "Queued"
-            entry.outputs = []
+        targets = self._targets()
+        if targets is None:
+            return
+        if self.configuration.trash_after_success and QMessageBox.question(
+            self,
+            "Move finished sources to Trash?",
+            "After every output for a video is saved and checked, Clipivo moves that source video to the Trash. "
+            "It never deletes anything.\n\nContinue?",
+        ) != QMessageBox.Yes:
+            return
+        run_ids = {entry.id for entry in entries}
+        for entry in self.configuration.videos:
+            if entry.id in run_ids:
+                entry.status, entry.progress, entry.detail, entry.outputs = "queued", 0, "Waiting", []
         self._populate_queue()
-        self.worker = BatchExecutionWorker(self.configuration, targets, self.face_engine, self)
+        configuration = BatchConfiguration.from_dict(self.configuration.to_dict())
+        configuration.save_next_to_source = self.configuration.save_next_to_source
+        configuration.videos = [entry for entry in configuration.videos if entry.id in run_ids]
+        configuration.video_encoder = self.video_encoder
+        factory = getattr(self.face_engine, "wide_shot_engine", None)
+        engine = factory() if callable(factory) else self.face_engine
+        self.worker = BatchExecutionWorker(configuration, targets, engine, self)
         worker = self.worker
         worker.entryUpdated.connect(self._entry_updated)
-        worker.reviewRequired.connect(self._review_required)
         worker.allFinished.connect(self._batch_finished)
         worker.finished.connect(self._worker_stopped)
         worker.finished.connect(worker.deleteLater)
         self._paused = False
-        self.pause_button.setText("Pause")
+        self.job.set_running(True)
+        self.job.show_progress(0, f"Starting {len(entries)} video{'s' if len(entries) != 1 else ''}…")
         self.runningChanged.emit(True)
         self._update_actions()
         worker.start()
 
     def _toggle_pause(self) -> None:
-        if not self.worker or not self.worker.isRunning():
+        if not self.is_running():
             return
         self._paused = not self._paused
         self.worker.set_paused(self._paused or self._foreground_busy)
-        self.pause_button.setText("Resume" if self._paused else ("Paused for editor" if self._foreground_busy else "Pause"))
+        self.job.set_running(True, paused=self._paused)
 
     def _cancel(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self.is_running():
             self.worker.cancel()
-
-    def _review_required(
-        self,
-        entry_id: str,
-        source: str,
-        character_id: str,
-        character_name: str,
-        ranges: list[ClipRange],
-    ) -> None:
-        self._review_entry_id = entry_id
-        self._review_source = Path(source)
-        self._review_character_id = character_id
-        self.review_banner.setText(
-            f"Review {len(ranges)} appearance range{'s' if len(ranges) != 1 else ''} for {character_name} in Video, then approve here."
-        )
-        self.review_banner.show()
-        self.approve_button.show()
-        self._entry_updated(entry_id, "review", 70, f"Waiting for manual review · {character_name}", [])
-        self.reviewRequested.emit(Path(source), character_id, character_name, ranges)
-
-    def _approve_review(self) -> None:
-        if self._review_source and self._review_character_id:
-            self.approveReviewRequested.emit(self._review_source, self._review_character_id)
 
     def _entry_updated(self, entry_id: str, status: str, progress: int, detail: str, outputs: list[str]) -> None:
         entry = next((item for item in self.configuration.videos if item.id == entry_id), None)
         if not entry:
             return
-        entry.status = status
-        entry.progress = progress
-        entry.detail = detail
+        entry.status, entry.progress, entry.detail = status, progress, detail
         if outputs:
             entry.outputs = list(outputs)
         row = self.configuration.videos.index(entry)
-        status_item = self.queue.item(row, 3)
+        status_item = self.queue.item(row, 2)
         status_item.setText(detail)
         status_item.setToolTip(detail)
-        bar = self.queue.cellWidget(row, 4)
+        bar = self.queue.cellWidget(row, 3)
         if isinstance(bar, QProgressBar):
             bar.setValue(progress)
             bar.setFormat(f"{progress}%")
+        active = [item for item in self.configuration.videos if item.status in {"queued", "analysing", "exporting"}]
+        done = [item for item in self.configuration.videos if item.status in {"completed", "no_match", "failed"}]
+        overall = round((len(done) * 100 + sum(item.progress for item in active if item.status != "queued")) / max(1, len(done) + len(active)))
+        self.job.show_progress(overall, f"{entry.path.name}: {detail}")
         self._persist()
 
     def _batch_finished(self, cancelled: bool) -> None:
         self.runningChanged.emit(False)
         self._paused = False
-        self.pause_button.setText("Pause")
         if cancelled:
             for entry in self.configuration.videos:
-                if entry.status in {"queued", "analysing", "exporting", "review"}:
-                    entry.status = "cancelled"
-                    entry.detail = "Cancelled · source kept"
+                if entry.status in {"queued", "analysing", "exporting"}:
+                    entry.status, entry.detail = "cancelled", "Cancelled · nothing was changed"
             self._populate_queue()
+        finished = [entry for entry in self.configuration.videos if entry.status == "completed"]
+        failed = [entry for entry in self.configuration.videos if entry.status == "failed"]
+        folder = ""
+        if finished and finished[-1].outputs:
+            folder = str(Path(finished[-1].outputs[0]).parent)
+        if cancelled:
+            text = "Cancelled. Finished videos are kept."
+        else:
+            text = f"Done · {len(finished)} video{'s' if len(finished) != 1 else ''} saved"
+            if failed:
+                text += f" · {len(failed)} failed (see list)"
+        self.job.show_finished(text, folder, success=not cancelled)
         self._persist()
         self._update_actions()
 
@@ -673,17 +526,13 @@ class BatchPage(QWidget):
         self._update_actions()
 
     def _queue_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._building or item.column() not in {0, 2}:
+        if self._building or item.column() != 0:
             return
         entry = self._entry_for_row(item.row())
-        if not entry:
-            return
-        if item.column() == 0:
+        if entry:
             entry.enabled = item.checkState() == Qt.Checked
-        else:
-            entry.manual_review = item.checkState() == Qt.Checked
-        self._persist()
-        self._update_summary()
+            self._persist()
+            self._update_summary()
 
     def _populate_queue(self) -> None:
         was_building = self._building
@@ -693,62 +542,45 @@ class BatchPage(QWidget):
             run_item = QTableWidgetItem()
             run_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
             run_item.setCheckState(Qt.Checked if entry.enabled else Qt.Unchecked)
-            run_item.setToolTip("Include this source in the next batch run")
+            run_item.setToolTip("Include this video when you press Start")
             self.queue.setItem(row, 0, run_item)
             video_item = QTableWidgetItem(entry.path.name)
             video_item.setData(Qt.UserRole, entry.id)
             video_item.setToolTip(str(entry.path))
             self.queue.setItem(row, 1, video_item)
-            review_item = QTableWidgetItem()
-            review_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-            review_item.setCheckState(Qt.Checked if entry.manual_review else Qt.Unchecked)
-            review_item.setToolTip("Pause after detection and open generated clips in the manual Video editor")
-            self.queue.setItem(row, 2, review_item)
-            status_item = QTableWidgetItem(entry.detail)
-            status_item.setToolTip(entry.detail)
-            self.queue.setItem(row, 3, status_item)
+            detail = "Waiting" if entry.detail == "Ready" else entry.detail
+            status_item = QTableWidgetItem(detail)
+            status_item.setToolTip(detail)
+            self.queue.setItem(row, 2, status_item)
             progress = QProgressBar()
             progress.setRange(0, 100)
             progress.setValue(entry.progress)
-            progress.setTextVisible(True)
             progress.setFormat(f"{entry.progress}%")
-            progress.setToolTip("Analysis and export progress for this source")
-            self.queue.setCellWidget(row, 4, progress)
+            self.queue.setCellWidget(row, 3, progress)
             self.queue.setRowHeight(row, 34)
         self._building = was_building
+        self.empty_hint.setVisible(not self.configuration.videos)
         self._update_summary()
         self._update_actions()
 
-    def _load_configuration_controls(self) -> None:
-        self.output_folder.setText(self.configuration.output_dir)
-        self.arrangement.setCurrentIndex(max(0, self.arrangement.findData(self.configuration.arrangement)))
-        self.quality.setCurrentIndex(max(0, self.quality.findData(self.configuration.quality)))
-        self.encoder.setCurrentIndex(max(0, self.encoder.findData(self.configuration.video_encoder)))
-        self.include_audio.setChecked(self.configuration.include_audio)
-        self.trash_source.setChecked(self.configuration.trash_after_success)
-
     def _sync_configuration(self) -> None:
-        self.configuration.character_ids = self._selected_character_ids()
-        self.configuration.output_dir = self.output_folder.text().strip()
-        self.configuration.arrangement = str(self.arrangement.currentData())
-        self.configuration.quality = str(self.quality.currentData())
-        self.configuration.video_encoder = str(self.encoder.currentData())
-        self.configuration.include_audio = self.include_audio.isChecked()
-        self.configuration.trash_after_success = self.trash_source.isChecked()
+        values = self.job.values()
+        self.configuration.character_ids = self.job.selected_ids()
+        self.configuration.output_dir = values["output_dir"]
+        self.configuration.save_next_to_source = values["save_next_to_source"]
+        self.configuration.arrangement = values["arrangement"]
+        self.configuration.mode = values["mode"]
+        self.configuration.include_audio = values["include_audio"]
+        self.configuration.trash_after_success = values["trash_after_success"]
 
     def _configuration_changed(self, *_args) -> None:
         if self._building:
             return
-        self._sync_configuration()
         self._persist()
         self._update_summary()
 
     def _selected_character_ids(self) -> list[str]:
-        return [
-            str(self.characters.item(row).data(Qt.UserRole))
-            for row in range(self.characters.count())
-            if self.characters.item(row).checkState() == Qt.Checked
-        ]
+        return self.job.selected_ids()
 
     def _entry_for_row(self, row: int) -> BatchVideoEntry | None:
         if row < 0 or row >= len(self.configuration.videos):
@@ -762,23 +594,23 @@ class BatchPage(QWidget):
         try:
             save_batch_configuration(self.configuration)
         except OSError as exc:
-            self.summary.setToolTip(f"Batch queue could not be saved: {exc}")
+            self.summary.setToolTip(f"Batch list could not be saved: {exc}")
 
     def _update_summary(self) -> None:
         videos = sum(1 for entry in self.configuration.videos if entry.enabled)
-        characters = len(self._selected_character_ids()) if hasattr(self, "characters") else 0
+        people = len(self.job.selected_ids()) if hasattr(self, "job") else 0
         self.summary.setText(
-            f"{videos} video{'s' if videos != 1 else ''} · {characters} selected character{'s' if characters != 1 else ''}"
+            f"{videos} video{'s' if videos != 1 else ''} · {people} {'person' if people == 1 else 'people'}"
         )
 
     def _update_actions(self) -> None:
-        running = bool(self.worker and self.worker.isRunning())
+        running = self.is_running()
         selected = self.queue.currentRow() >= 0
-        self.start_button.setEnabled(not running and bool(self.configuration.videos))
-        self.pause_button.setEnabled(running and not self._review_entry_id)
-        self.cancel_button.setEnabled(running)
         self.add_videos_button.setEnabled(not running)
         self.add_folder_button.setEnabled(not running)
         self.remove_button.setEnabled(not running and selected)
-        self.open_editor_button.setEnabled(selected and (not running or bool(self._review_entry_id)))
-        self.queue.setEnabled(not running or bool(self._review_entry_id))
+        self.clear_done_button.setEnabled(not running and any(
+            entry.status in {"completed", "no_match"} for entry in self.configuration.videos
+        ))
+        self.open_editor_button.setEnabled(selected)
+        self.queue.setEnabled(not running)

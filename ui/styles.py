@@ -252,6 +252,10 @@ def app_stylesheet() -> str:
     }}
     QListWidget#batchCharacters::item {{ padding: 5px 7px; border-bottom: 1px solid #252b34; }}
     QListWidget#batchCharacters::item:selected {{ background: {p['input']}; }}
+    QListWidget#batchCharacters::indicator {{
+        width: 13px; height: 13px; border: 1px solid #5a6472; border-radius: 3px; background: #14181e;
+    }}
+    QListWidget#batchCharacters::indicator:checked {{ background: {p['accent']}; border-color: {p['accent']}; }}
     QProgressBar {{
         background: #101318;
         border: 1px solid {p['border']};

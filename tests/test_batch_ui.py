@@ -49,7 +49,7 @@ class BatchUiTests(unittest.TestCase):
         self.environment.stop()
         self.temporary.cleanup()
 
-    def test_batch_page_queues_videos_characters_and_review_flags(self) -> None:
+    def test_batch_page_queues_videos_and_people(self) -> None:
         page = BatchPage(self.store, AvailableEngine())
         try:
             page.add_paths([self.video, self.video])
@@ -57,12 +57,15 @@ class BatchUiTests(unittest.TestCase):
             self.assertEqual(page.queue.item(0, 1).text(), "source video.mp4")
             self.assertFalse(page.trash_source.isChecked())
             self.assertIn("Trash", page.trash_source.toolTip())
-            page.queue.item(0, 2).setCheckState(Qt.Checked)
-            self.assertTrue(page.configuration.videos[0].manual_review)
             page.characters.item(0).setCheckState(Qt.Checked)
             self.assertEqual(len(page._selected_character_ids()), 1)
             self.assertIn("1 video", page.summary.text())
-            self.assertIn("1 selected character", page.summary.text())
+            self.assertIn("1 person", page.summary.text())
+            page.one_time.add([("guest.png", b"guest")])
+            labels = [page.characters.item(row).text() for row in range(page.characters.count())]
+            self.assertTrue(labels[-1].startswith("One-time person"))
+            self.assertEqual(page.characters.item(page.characters.count() - 1).checkState(), Qt.Checked)
+            self.assertEqual(len(page._selected_character_ids()), 2)
         finally:
             page.close()
 
@@ -73,6 +76,7 @@ class BatchUiTests(unittest.TestCase):
             output_dir=str(output_dir),
             arrangement="compilation",
             trash_after_success=True,
+            save_next_to_source=False,
         )
         targets = [
             BatchCharacterTarget(self.alex.id, self.alex.name, [("alex.jpg", b"alex")], 0.4),
@@ -103,11 +107,20 @@ class BatchUiTests(unittest.TestCase):
         ):
             worker.run()
         self.assertEqual([call.kwargs["output_character"] for call in export.call_args_list], ["Alex", "Sam"])
+        self.assertTrue(all(call.args[2] == output_dir for call in export.call_args_list))
         self.assertTrue(all(call.kwargs["source_video_bitrate_kbps"] == 900 for call in export.call_args_list))
         self.assertEqual(validate.call_count, 2)
         self.assertTrue(all(call.kwargs["expected_duration_ms"] == 2000 for call in validate.call_args_list))
         trash.assert_called_once_with(self.video)
         self.assertEqual(updates[-1][1], "completed")
+
+    def test_same_folder_option_saves_next_to_each_source(self) -> None:
+        configuration = BatchConfiguration(videos=[BatchVideoEntry(str(self.video))], output_dir="/elsewhere", save_next_to_source=True)
+        self.assertEqual(configuration.output_dir_for(self.video), self.video.parent)
+        configuration.save_next_to_source = False
+        self.assertEqual(configuration.output_dir_for(self.video), Path("/elsewhere"))
+        restored = BatchConfiguration.from_dict(configuration.to_dict())
+        self.assertFalse(restored.save_next_to_source)
 
     def test_no_match_never_trashes_source(self) -> None:
         configuration = BatchConfiguration(

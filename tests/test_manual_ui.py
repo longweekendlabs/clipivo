@@ -13,6 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
 from core.models import ClipRange
+from core.face_engine import EngineStatus
 from core.filters import create_filter
 from core.video_controller import DecodedFrame
 from core.video_probe import probe_video
@@ -26,6 +27,8 @@ class ManualUiTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
         cls.temporary = tempfile.TemporaryDirectory(prefix="clipivo-ui-tests-")
+        cls.environment = patch.dict("os.environ", {"XDG_DATA_HOME": str(Path(cls.temporary.name) / "data")})
+        cls.environment.start()
         cls.video = Path(cls.temporary.name) / "ui-test.mp4"
         subprocess.run(
             [
@@ -39,6 +42,7 @@ class ManualUiTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
+        cls.environment.stop()
         cls.temporary.cleanup()
 
     def test_open_step_mark_and_add_range(self) -> None:
@@ -172,25 +176,21 @@ class ManualUiTests(unittest.TestCase):
         fake.set_pause.assert_called_with(1)
         fake.audio_set_mute.assert_called_with(False)
 
-    def test_export_modes_explain_their_tradeoff(self) -> None:
+    def test_output_choices_explain_themselves_and_drive_save(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1])
         try:
-            self.assertEqual(window.right_panel.output.itemText(0), "Copy MP4")
-            self.assertEqual(window.right_panel.output.currentData(), "accurate")
-            self.assertIn("Exact A/B", window.right_panel.output_hint.text())
-            self.assertEqual(window.right_panel.arrangement.currentData(), "separate")
-            self.assertTrue(window.right_panel.include_audio.isChecked())
-            window.right_panel.arrangement.setCurrentIndex(1)
-            window.right_panel.include_audio.setChecked(False)
-            self.assertEqual(window.right_panel.output.itemText(1), "Exact-cut MP4")
-            self.assertIn("Exact A/B", window.right_panel.output_hint.text())
-            with patch.object(window, "_request_export") as request_export:
-                window._request_export_selected_mode()
-                request_export.assert_called_once_with("accurate", True, False)
-
-            window.right_panel.output.setCurrentIndex(0)
             window._video_opened(probe_video(self.video))
-            self.assertEqual(window.right_panel.output.currentData(), "accurate")
+            job = window.right_panel.job
+            self.assertEqual([job.mode.itemText(row) for row in range(job.mode.count())], ["Exact cut", "Fast copy"])
+            self.assertIn("exact frame", job.mode.itemData(0, Qt.ToolTipRole))
+            self.assertIn("keyframe", job.mode.itemData(1, Qt.ToolTipRole))
+            self.assertEqual(job.destination.itemText(0), "Same folder as video")
+            self.assertEqual(job.destination.itemData(job.destination.count() - 1), "__choose_folder__")
+            job.arrangement.setCurrentIndex(job.arrangement.findData("compilation"))
+            job.include_audio.setChecked(False)
+            with patch.object(window, "_request_export") as request_export:
+                window.right_panel.save_button.click()
+                request_export.assert_called_once_with("accurate", True, False)
         finally:
             window.close()
 
@@ -311,82 +311,67 @@ class ManualUiTests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_single_clip_export_asks_for_a_filename(self) -> None:
+    def test_save_clips_writes_next_to_the_source_without_asking(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1])
         try:
             window._video_opened(probe_video(self.video))
             window.right_panel.set_clips([ClipRange(0, 1000)])
-            target = Path(self.temporary.name) / "my clip.mp4"
+            window.right_panel.job.set_values({"save_next_to_source": True, "arrangement": "separate"})
             with (
-                patch("ui.main_window.choose_save_file", return_value=str(target)) as save_dialog,
+                patch("ui.main_window.choose_save_file") as save_dialog,
+                patch("ui.main_window.choose_directory") as folder_dialog,
                 patch.object(window, "_start_export") as start_export,
             ):
-                window._request_export("copy", False, True)
-            save_dialog.assert_called_once()
-            start_export.assert_called_once_with(target.parent, "copy", False, True, target)
+                window._request_export("accurate", False, True)
+            save_dialog.assert_not_called()
+            folder_dialog.assert_not_called()
+            start_export.assert_called_once_with(self.video.parent, "accurate", False, True, None)
         finally:
             window.close()
 
-    def test_find_all_replaces_automatic_clips_and_keeps_manual_ones(self) -> None:
+    def test_start_results_replace_automatic_clips_and_keep_manual_ones(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1])
         try:
             window._video_opened(probe_video(self.video))
             manual = ClipRange(0, 200, origin="manual")
             window.right_panel.set_clips([manual, ClipRange(600, 800, origin="automatic")])
             found = [ClipRange(300, 700, origin="automatic"), ClipRange(1200, 1800, origin="automatic_uncertain")]
-            with (
-                patch("ui.main_window.QMessageBox.exec", return_value=0),
-                patch("ui.main_window.QMessageBox.clickedButton", return_value=None),
-                patch.object(window, "_request_export_selected_mode") as export,
-                patch("ui.main_window.save_ranges"),
-            ):
-                window._find_all_finished(found)
-            export.assert_not_called()
+            with patch("ui.main_window.save_ranges"):
+                window._video_job_ranges("entry", "person", "Presenter", found)
             clips = window.right_panel.ranges()
             self.assertEqual([(c.start_ms, c.end_ms) for c in clips], [(0, 200), (300, 700), (1200, 1800)])
-            self.assertEqual(window.right_panel.arrangement.currentData(), "stitched")
             self.assertEqual(window.timeline.detections, [300, 1200])
             self.assertEqual(window.detected_appearances, [])
             self.assertEqual((window.marker_a, window.marker_b), (300, 700))
         finally:
             window.close()
 
-    def test_find_all_save_button_exports_stitched_video(self) -> None:
-        window = MainWindow(Path(__file__).resolve().parents[1])
+    def test_start_queues_this_video_for_the_one_time_person(self) -> None:
+        engine = MagicMock()
+        engine.status.return_value = EngineStatus(True, "GPU", "Test engine")
+        window = MainWindow(Path(__file__).resolve().parents[1], face_engine=engine)
         try:
             window._video_opened(probe_video(self.video))
-            with (
-                patch("ui.main_window.QMessageBox.exec", return_value=0),
-                patch("ui.main_window.QMessageBox.clickedButton", lambda box: box.defaultButton()),
-                patch.object(window, "_request_export_selected_mode") as export,
-                patch("ui.main_window.save_ranges"),
-            ):
-                window._find_all_finished([ClipRange(100, 900, origin="automatic")])
-            export.assert_called_once_with()
+            window.one_time_person.add([("a.png", b"face-a"), ("b.png", b"face-b")])
+            self.assertEqual(window.current_target.name, "One-time person")
+            window.right_panel.job.set_values({"arrangement": "compilation", "save_next_to_source": True, "mode": "accurate"})
+            with patch("ui.main_window.BatchExecutionWorker") as worker_class:
+                window._start_video_job()
+            configuration, targets, _engine = worker_class.call_args.args[:3]
+            self.assertEqual([entry.path for entry in configuration.videos], [self.video])
+            self.assertTrue(configuration.save_next_to_source)
+            self.assertEqual(configuration.arrangement, "compilation")
+            self.assertEqual(targets[0].references, [("a.png", b"face-a"), ("b.png", b"face-b")])
+            worker_class.return_value.start.assert_called_once()
+            self.assertFalse(window.right_panel.job.start_button.isEnabled())
+
+            window._video_job_updated("entry", "completed", 100, "Done · 1 clip · 0:01", [str(self.video.parent / "out.mp4")])
+            window._video_job_finished(False)
+            self.assertIn("Done", window.right_panel.job.status.text())
+            self.assertFalse(window.right_panel.job.open_folder_button.isHidden())
+            self.assertTrue(window.right_panel.job.start_button.isEnabled())
         finally:
             window.close()
-
-    def test_find_all_worker_reports_ranges_and_refinement_progress(self) -> None:
-        from core.batch import BatchCharacterTarget, CharacterAppearances
-        from ui.main_window import FindAllWorker
-
-        ranges = (ClipRange(100, 900, origin="automatic"),)
-
-        def fake_analyse(*_args, progress, refine_progress, **_kwargs):
-            progress(500, 2000, "Analysing faces")
-            refine_progress(0, 1)
-            return [CharacterAppearances("id", "Presenter", (), ranges)]
-
-        target = BatchCharacterTarget("id", "Presenter", [("a.png", b"x")], 0.4)
-        worker = FindAllWorker(self.video, 2000, MagicMock(), target)
-        progress, results = [], []
-        worker.progressed.connect(lambda *args: progress.append(args))
-        worker.finishedRanges.connect(results.append)
-        with patch("ui.main_window.analyse_video_for_characters", side_effect=fake_analyse):
-            worker.run()
-        self.assertEqual(results, [list(ranges)])
-        self.assertEqual(progress[0], (500, 2000, "Scanning the whole video"))
-        self.assertEqual(progress[1], (0, 1, "Tightening clip edges 1 of 1"))
 
     def test_double_marker_press_sets_the_opposite_marker(self) -> None:
         window = MainWindow(Path(__file__).resolve().parents[1])
@@ -434,12 +419,12 @@ class ManualUiTests(unittest.TestCase):
             for dialog in window.findChildren(FilterConfigDialog):
                 dialog.done(QDialog.Accepted)
             self.assertEqual([item.kind for item in page.filters()], ["crop"])
-            self.assertEqual(window.right_panel.output.currentData(), "accurate")
-            self.assertFalse(window.right_panel.output.model().item(0).isEnabled())
+            self.assertEqual(window.right_panel.job.mode.currentData(), "accurate")
+            self.assertFalse(window.right_panel.job.mode.model().item(1).isEnabled())
 
             page._remove_filter()
             self.assertEqual(page.filters(), [])
-            self.assertTrue(window.right_panel.output.model().item(0).isEnabled())
+            self.assertTrue(window.right_panel.job.mode.model().item(1).isEnabled())
 
             for category_row, available_row, expected in ((0, 1, "Rotate"), (1, 0, "Contrast")):
                 page.show_manager()
