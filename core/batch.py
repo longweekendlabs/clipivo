@@ -17,6 +17,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
+from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
 
@@ -26,6 +27,15 @@ QUEUE_STATES = {
     "queued", "analysing", "review", "exporting", "completed", "no_match",
     "cancelled", "failed",
 }
+
+
+SOURCE_AFTER = {
+    "keep": "Leave it where it is",
+    "subfolder": "Move into a “Clipivo done” folder beside it",
+    "folder": "Move to a folder I choose",
+    "trash": "Move to Trash",
+}
+DONE_SUBFOLDER = "Clipivo done"
 
 
 @dataclass
@@ -38,6 +48,8 @@ class BatchVideoEntry:
     detail: str = "Ready"
     outputs: list[str] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid4().hex)
+    # Only these people are looked for in this video.
+    person_ids: list[str] = field(default_factory=list)
 
     @property
     def path(self) -> Path:
@@ -60,6 +72,7 @@ class BatchVideoEntry:
             progress=max(0, min(100, int(payload.get("progress", 0)))),
             detail=str(payload.get("detail", "Ready")),
             outputs=[str(item) for item in payload.get("outputs", [])],
+            person_ids=[str(item) for item in payload.get("person_ids", [])],
         )
 
 
@@ -72,9 +85,12 @@ class BatchConfiguration:
     quality: str = "balanced"
     include_audio: bool = True
     video_encoder: str = "auto"
-    trash_after_success: bool = False
     save_next_to_source: bool = True
-    mode: str = "accurate"
+    mode: str = "copy"
+    source_after: str = "keep"
+    source_folder: str = ""
+    naming: str = "source_date"
+    custom_name: str = ""
 
     def output_dir_for(self, source: Path) -> Path:
         if self.save_next_to_source or not self.output_dir:
@@ -83,7 +99,7 @@ class BatchConfiguration:
 
     def to_dict(self) -> dict:
         payload = asdict(self)
-        payload["version"] = 1
+        payload["version"] = 2
         return payload
 
     @classmethod
@@ -91,6 +107,10 @@ class BatchConfiguration:
         arrangement = str(payload.get("arrangement", "compilation"))
         quality = str(payload.get("quality", "balanced"))
         encoder = str(payload.get("video_encoder", "auto"))
+        source_after = str(payload.get("source_after", "trash" if payload.get("trash_after_success") else "keep"))
+        if source_after not in SOURCE_AFTER:
+            source_after = "keep"
+        naming = str(payload.get("naming", "source_date"))
         return cls(
             videos=[BatchVideoEntry.from_dict(item) for item in payload.get("videos", []) if isinstance(item, dict)],
             character_ids=[str(item) for item in payload.get("character_ids", [])],
@@ -99,9 +119,13 @@ class BatchConfiguration:
             quality=quality if quality in {"rapid", "balanced", "thorough"} else "balanced",
             include_audio=bool(payload.get("include_audio", True)),
             video_encoder=encoder if encoder in {"auto", "nvenc", "cpu"} else "auto",
-            trash_after_success=bool(payload.get("trash_after_success", False)),
             save_next_to_source=bool(payload.get("save_next_to_source", not payload.get("output_dir"))),
-            mode="copy" if payload.get("mode") == "copy" else "accurate",
+            # Version 1 re-encoded by default; original quality is the default from version 2.
+            mode="accurate" if payload.get("mode") == "accurate" and int(payload.get("version", 1)) >= 2 else "copy",
+            source_after=source_after,
+            source_folder=str(payload.get("source_folder", "")),
+            naming=naming if naming in NAMING_SCHEMES else "source_date",
+            custom_name=str(payload.get("custom_name", "")),
         )
 
 
@@ -510,6 +534,38 @@ def validate_export(path: Path, *, expected_duration_ms: int = 0) -> None:
     if completed.returncode != 0:
         detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "tail decode failed"
         raise RuntimeError(f"Export is not playable through its ending: {detail}")
+
+
+def move_source_to_folder(source: Path, folder: Path) -> Path:
+    """Move a finished source into `folder` without overwriting anything there."""
+    source = Path(source)
+    if not source.is_file():
+        raise RuntimeError(f"Source is no longer available: {source}")
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    number = 2
+    while target.exists():
+        target = folder / f"{source.stem} ({number}){source.suffix}"
+        number += 1
+    shutil.move(str(source), str(target))
+    return target
+
+
+def handle_finished_source(source: Path, choice: str, chosen_folder: str = "") -> str:
+    """Apply the user's choice to a source whose outputs all validated. Returns a short status."""
+    if choice == "subfolder":
+        move_source_to_folder(source, Path(source).parent / DONE_SUBFOLDER)
+        return f"source moved to “{DONE_SUBFOLDER}”"
+    if choice == "folder":
+        if not chosen_folder:
+            raise RuntimeError("Choose a folder for finished sources.")
+        moved = move_source_to_folder(source, Path(chosen_folder))
+        return f"source moved to {moved.parent}"
+    if choice == "trash":
+        move_source_to_trash(source)
+        return "source moved to Trash"
+    return ""
 
 
 def move_source_to_trash(source: Path) -> None:

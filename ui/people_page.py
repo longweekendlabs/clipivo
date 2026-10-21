@@ -147,27 +147,17 @@ class PeoplePage(QWidget):
         reusable_toolbar.addWidget(self.new_button)
         reusable_toolbar.addWidget(self.batch_button)
         reusable_toolbar.addStretch()
-        self.character_menu_button = QToolButton()
-        self.character_menu_button.setText("⋯")
-        self.character_menu_button.setObjectName("compactMenu")
-        self.character_menu_button.setToolTip("Rename or delete the selected person")
-        self.character_menu_button.setPopupMode(QToolButton.InstantPopup)
-        character_menu = QMenu(self.character_menu_button)
         self.rename_action = QAction("Rename…", self)
-        self.rename_action.setToolTip("Rename the selected reusable character")
         self.rename_action.triggered.connect(self._rename_character)
         self.delete_action = QAction("Delete…", self)
-        self.delete_action.setToolTip("Delete the selected reusable character and encrypted references")
         self.delete_action.triggered.connect(self._delete_character)
-        character_menu.addAction(self.rename_action)
-        character_menu.addAction(self.delete_action)
-        self.character_menu_button.setMenu(character_menu)
-        reusable_toolbar.addWidget(self.character_menu_button)
         reusable_layout.addLayout(reusable_toolbar)
         self.character_list = QListWidget()
         self.character_list.setObjectName("characterList")
         self.character_list.setToolTip("Select a person to see and edit their photos")
         self.character_list.currentItemChanged.connect(self._persistent_selected)
+        self.character_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.character_list.customContextMenuRequested.connect(self._character_context_menu)
         reusable_layout.addWidget(self.character_list, 1)
         library_layout.addWidget(reusable_group, 1)
 
@@ -182,6 +172,10 @@ class PeoplePage(QWidget):
         self.selection_title.setToolTip("Character currently being edited")
         selection_header.addWidget(self.selection_title)
         selection_header.addStretch()
+        self.rename_button = self._button("Rename", "Rename this person", self._rename_character)
+        self.delete_button = self._button("Delete person", "Delete this person and all their photos", self._delete_character)
+        selection_header.addWidget(self.rename_button)
+        selection_header.addWidget(self.delete_button)
         editor_layout.addLayout(selection_header)
 
         reference_toolbar = QHBoxLayout()
@@ -322,9 +316,10 @@ class PeoplePage(QWidget):
     def _update_editor_enabled(self) -> None:
         selected = bool(self.current_character and self.store)
         persistent = selected
-        self.character_menu_button.setEnabled(bool(persistent))
         self.rename_action.setEnabled(bool(persistent))
         self.delete_action.setEnabled(bool(persistent))
+        self.rename_button.setEnabled(bool(persistent))
+        self.delete_button.setEnabled(bool(persistent))
         self.add_references_button.setEnabled(selected)
         self.add_photos_action.setEnabled(selected)
         self.add_folder_action.setEnabled(selected)
@@ -332,6 +327,16 @@ class PeoplePage(QWidget):
         self.delete_reference_button.setEnabled(selected)
         self.validate_button.setEnabled(selected)
         self.test_button.setEnabled(selected)
+
+    def _character_context_menu(self, position) -> None:
+        item = self.character_list.itemAt(position)
+        if not item:
+            return
+        self.character_list.setCurrentItem(item)
+        menu = QMenu(self.character_list)
+        menu.addAction(self.rename_action)
+        menu.addAction(self.delete_action)
+        menu.exec(self.character_list.viewport().mapToGlobal(position))
 
     def _new_character(self) -> None:
         if not self.store:

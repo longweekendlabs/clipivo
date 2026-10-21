@@ -14,6 +14,7 @@ from core.batch import (
     analyse_video_for_characters,
     build_appearance_ranges,
     discover_videos,
+    handle_finished_source,
     load_batch_configuration,
     move_source_to_trash,
     safe_name_component,
@@ -73,14 +74,33 @@ class BatchCoreTests(unittest.TestCase):
             output_dir=str(self.root / "outputs"),
             arrangement="separate",
             quality="rapid",
-            trash_after_success=True,
+            source_after="trash",
         )
         save_batch_configuration(configuration, state)
         restored = load_batch_configuration(state)
         self.assertEqual(restored.character_ids, ["alex", "sam"])
         self.assertTrue(restored.videos[0].manual_review)
         self.assertEqual(restored.videos[0].status, "queued")
-        self.assertTrue(restored.trash_after_success)
+        self.assertEqual(restored.source_after, "trash")
+
+    def test_old_queue_settings_carry_over(self) -> None:
+        restored = BatchConfiguration.from_dict({
+            "version": 1, "videos": [], "trash_after_success": True, "mode": "accurate",
+        })
+        self.assertEqual(restored.source_after, "trash")
+        self.assertEqual(restored.mode, "copy")
+
+    def test_finished_source_moves_into_done_folder_without_overwriting(self) -> None:
+        folder = self.root / "move-test"
+        folder.mkdir(exist_ok=True)
+        for name in ("news.mp4", "Clipivo done/news.mp4"):
+            (folder / name).parent.mkdir(exist_ok=True)
+            (folder / name).write_bytes(b"x")
+        status = handle_finished_source(folder / "news.mp4", "subfolder")
+        self.assertIn("Clipivo done", status)
+        self.assertFalse((folder / "news.mp4").exists())
+        self.assertTrue((folder / "Clipivo done" / "news (2).mp4").is_file())
+        self.assertEqual(handle_finished_source(folder / "missing.mp4", "keep"), "")
 
     def test_folder_discovery_and_character_filename_safety(self) -> None:
         nested = self.root / "nested"

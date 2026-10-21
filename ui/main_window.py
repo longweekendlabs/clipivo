@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
@@ -50,7 +51,9 @@ from core.video_probe import ProbeError, probe_video
 
 from .about_dialog import AboutDialog
 from .batch_page import BatchExecutionWorker, BatchPage
-from core.batch import BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
+from core.batch import VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
+from core.export import snap_to_keyframes
+from core.naming import output_base_name
 from .icons import line_icon
 from .job_panel import OneTimePerson
 from .filters_page import FiltersPage
@@ -75,9 +78,25 @@ class ProbeWorker(QThread):
 
     def run(self) -> None:
         try:
-            self.succeeded.emit(probe_video(self.path, include_keyframes=True))
+            # The keyframe index reads the whole file, which can take many seconds on a
+            # slow drive; it is built afterwards by KeyframeWorker so the video opens at once.
+            self.succeeded.emit(probe_video(self.path, include_keyframes=False))
         except (ProbeError, OSError, ValueError) as exc:
             self.failed.emit(str(exc))
+
+
+class KeyframeWorker(QThread):
+    indexed = Signal(object, object)
+
+    def __init__(self, path: Path, parent=None):
+        super().__init__(parent)
+        self.path = path
+
+    def run(self) -> None:
+        try:
+            self.indexed.emit(self.path, probe_video(self.path, include_keyframes=True).keyframes_ms)
+        except (ProbeError, OSError, ValueError):
+            pass
 
 
 class ExportWorker(QThread):
@@ -98,10 +117,10 @@ class ExportWorker(QThread):
         source_fps: float,
         video_encoder: str,
         parent=None,
-        output_character: str = "",
+        output_name: str | None = None,
     ):
         super().__init__(parent)
-        self.output_character = output_character
+        self.output_name = output_name
         self.source = source
         self.clips = [ClipRange.from_dict(item.to_dict()) for item in clips]
         self.output_dir = output_dir
@@ -119,9 +138,14 @@ class ExportWorker(QThread):
 
     def run(self) -> None:
         try:
+            clips = self.clips
+            if self.mode == "copy" and not any(item.enabled for item in self.filters):
+                # A stream copy starts on a keyframe; snap first so clips never repeat footage.
+                self.progressed.emit(0, 1, "Finding keyframes for original-quality cuts")
+                clips = snap_to_keyframes(self.source, clips)
             outputs = export_ranges(
                 source=self.source,
-                ranges=self.clips,
+                ranges=clips,
                 output_dir=self.output_dir,
                 mode=self.mode,
                 stitched=self.stitched,
@@ -132,7 +156,7 @@ class ExportWorker(QThread):
                 filters=self.filters,
                 source_fps=self.source_fps,
                 video_encoder=self.video_encoder,
-                output_character=self.output_character,
+                output_name=self.output_name,
             )
             self.succeeded.emit(outputs)
         except ExportError as exc:
@@ -331,6 +355,8 @@ class MainWindow(QMainWindow):
         self.selection_play_end_ms: int | None = None
         self.playback_muted = False
         self.probe_worker: ProbeWorker | None = None
+        self.keyframe_worker: KeyframeWorker | None = None
+        self._keyframe_workers: set[KeyframeWorker] = set()
         self.export_worker: ExportWorker | None = None
         self.export_progress: QProgressDialog | None = None
         self.find_worker: FindCharacterWorker | None = None
@@ -356,6 +382,7 @@ class MainWindow(QMainWindow):
         self.resize(1584, 940)
         self.setStyleSheet(app_stylesheet())
         self._build_actions()
+        self.setAcceptDrops(True)
         self._build_menu()
         self._build_toolbar()
         self._build_center()
@@ -387,7 +414,8 @@ class MainWindow(QMainWindow):
             "Save the currently displayed source-resolution video frame as a PNG (Ctrl+P)",
         )
         screenshot.setEnabled(False)
-        create("close_window", "Close window", self.close, "Ctrl+W", "Close the Clipivo window (Ctrl+W)")
+        create("close_video", "Close video", self._close_video, "Ctrl+W", "Close the open video (Ctrl+W)")
+        create("close_window", "Close window", self.close, None, "Close the Clipivo window")
         create("exit", "Exit", self.close, "Ctrl+Q")
         create("marker_a", "Set marker A", self._set_marker_a, "A")
         create("marker_b", "Set marker B", self._set_marker_b, "B")
@@ -426,7 +454,7 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menus = {
-            "File": ["open", "export", "screenshot", "close_window", "exit"],
+            "File": ["open", "export", "screenshot", "close_video", "close_window", "exit"],
             "Edit": ["marker_a", "marker_b", "add_range", "remove_clip"],
             "View": ["collapse", "start", "end"],
             "Video": ["play", "play_selection", "stop", "previous_frame", "next_frame", "previous_keyframe", "next_keyframe", "find_character"],
@@ -782,6 +810,7 @@ class MainWindow(QMainWindow):
         except DecodeError as exc:
             self._video_open_failed(str(exc))
             return
+        self._thumbnail_queue = []
         if self.controller:
             self.controller.close()
         self.video_info = info
@@ -799,6 +828,8 @@ class MainWindow(QMainWindow):
         self.player.setSource(info.path)
         self.right_panel.set_clips(load_ranges(info.path))
         self.video_job.clear_status()
+        self.video_job.set_preview_source(info.path)
+        self._start_keyframe_index(info.path)
         self.filters_page.set_filters(load_filters(info.path))
         self.filters_page.set_source(info, self.preview.source)
         self._filters_changed(self.filters_page.filters(), persist=False)
@@ -811,6 +842,69 @@ class MainWindow(QMainWindow):
         self._set_video_controls_enabled(True)
         self._set_status_for_info(info)
         self.ready_text.setText("Ready")
+
+    def _start_keyframe_index(self, path: Path) -> None:
+        if self.keyframe_worker and self.keyframe_worker.isRunning():
+            self.keyframe_worker.indexed.disconnect()
+        worker = KeyframeWorker(path, self)
+        self.keyframe_worker = worker
+        self._keyframe_workers.add(worker)
+        worker.indexed.connect(self._keyframes_indexed)
+        worker.finished.connect(lambda: self._keyframe_worker_finished(worker))
+        worker.start()
+
+    def _keyframe_worker_finished(self, worker: KeyframeWorker) -> None:
+        if self.keyframe_worker is worker:
+            self.keyframe_worker = None
+        self._keyframe_workers.discard(worker)
+        worker.deleteLater()
+
+    def _keyframes_indexed(self, path: Path, keyframes: tuple[int, ...]) -> None:
+        if self.video_info and self.video_info.path == path:
+            self.video_info = replace(self.video_info, keyframes_ms=tuple(keyframes))
+
+    def _close_video(self) -> None:
+        if not self.video_info:
+            return
+        if self._video_job_running():
+            QMessageBox.information(self, "Clipivo is busy", "Finish or cancel the current job before closing the video.")
+            return
+        if self.find_worker and self.find_worker.isRunning():
+            self.find_worker.cancel()
+            self.find_worker.wait(3000)
+        self.player.stop()
+        self._thumbnail_queue = []
+        if self.controller:
+            self.controller.close()
+            self.controller = None
+        self.video_info = None
+        self.current_ms = 0
+        self.marker_a = self.marker_b = None
+        self.timeline.marker_a = self.timeline.marker_b = None
+        self.timeline.detections = []
+        self.timeline.setValue(0)
+        self.timeline.update()
+        self.preview.clear()
+        self.right_panel.set_clips([])
+        self.video_job.clear_status()
+        self._clear_current_target()
+        self._set_video_controls_enabled(False)
+        self.source_label.setText("No video loaded")
+        self.status_text.setText("  No video loaded    •   ")
+        self._update_marker_labels()
+        self._update_timecode()
+        self.ready_text.setText("Video closed")
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls() and self.pages.currentIndex() == 0:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        videos = [path for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES]
+        if videos:
+            event.acceptProposedAction()
+            self.open_video(videos[0])
 
     def _batch_open_video_requested(self, source: Path) -> None:
         self._select_page(0)
@@ -1378,13 +1472,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Choose a folder", "Pick where to save in Save to.")
             return
         configuration = BatchConfiguration(
-            videos=[BatchVideoEntry(str(self.video_info.path))],
+            videos=[BatchVideoEntry(str(self.video_info.path), person_ids=[person.id])],
             output_dir=values["output_dir"],
             arrangement=values["arrangement"],
             include_audio=values["include_audio"],
             video_encoder=self.export_video_encoder,
             save_next_to_source=values["save_next_to_source"],
             mode=values["mode"],
+            naming=values["naming"],
+            custom_name=values["custom_name"],
         )
         target = BatchCharacterTarget(person.id, person.name, references, self.people_page.match_threshold)
         self.player.stop()
@@ -1473,11 +1569,13 @@ class MainWindow(QMainWindow):
             self.find_worker = None
         worker.deleteLater()
 
-    def _target_references_changed(self, character: CharacterRecord) -> None:
-        if self.current_target and self.current_target.id == character.id:
-            self._set_current_target(character, persist=False)
+    def _target_references_changed(self, _character: CharacterRecord) -> None:
+        self.video_job.refresh_people()
+        self.batch_page.refresh_characters()
 
     def _target_character_deleted(self, character_id: str) -> None:
+        self.video_job.refresh_people()
+        self.batch_page.refresh_characters()
         if not self.current_target or self.current_target.id != character_id:
             return
         self._clear_current_target()
@@ -1522,17 +1620,6 @@ class MainWindow(QMainWindow):
                 message = "Press Start to find clips, or set A and B to mark one yourself."
             QMessageBox.information(self, "No clips", message)
             return
-        if mode == "copy" and any(not self._is_keyframe(clip.start_ms) for clip in clips):
-            answer = QMessageBox.warning(
-                self,
-                "Fast copy can shift clip starts",
-                "Some clips don't start on a keyframe, so fast copy may start them a little early. "
-                "Exact cut follows the frames precisely.\n\nSave with fast copy anyway?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                return
         values = self.video_job.values()
         if values["save_next_to_source"]:
             output_dir = self.video_info.path.parent
@@ -1564,10 +1651,10 @@ class MainWindow(QMainWindow):
         include_audio: bool,
         target: Path | None = None,
     ) -> None:
-        person = self.current_target.name if self.current_target and self.current_target.scope == "persistent" else ""
+        values = self.video_job.values()
         self.export_worker = ExportWorker(
             self.video_info.path,
-            self.right_panel.ranges(),
+            [item for item in self.right_panel.ranges() if item.enabled],
             output_dir,
             mode,
             stitched,
@@ -1577,7 +1664,7 @@ class MainWindow(QMainWindow):
             self.video_info.fps,
             self.export_video_encoder,
             self,
-            output_character=person,
+            output_name=output_base_name(self.video_info.path, values["naming"], values["custom_name"]),
         )
         self.video_job.set_running(True)
         self.video_job.show_progress(0, "Saving clips…")
@@ -1600,9 +1687,6 @@ class MainWindow(QMainWindow):
         self.video_job.show_finished(
             "Cancelled. Nothing was saved." if cancelled else f"Save failed: {detail}", success=False
         )
-
-    def _is_keyframe(self, milliseconds: int) -> bool:
-        return bool(self.video_info and any(abs(value - milliseconds) <= 2 for value in self.video_info.keyframes_ms))
 
     def _set_status_for_info(self, info: VideoInfo) -> None:
         audio_count = sum(stream.kind == "audio" for stream in info.streams)
@@ -1685,8 +1769,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "batch_page") and self.batch_page.worker and self.batch_page.worker.isRunning():
             self.batch_page.worker.cancel()
             self.batch_page.worker.wait(5000)
+        self._thumbnail_queue = []
         if self.controller:
             self.controller.close()
+            self.controller = None
         if self.export_worker and self.export_worker.isRunning():
             self.export_worker.cancel()
             self.export_worker.wait(3000)
@@ -1698,4 +1784,7 @@ class MainWindow(QMainWindow):
             self.job_worker.wait(5000)
         if self.probe_worker and self.probe_worker.isRunning():
             self.probe_worker.wait(5000)
+        for worker in list(self._keyframe_workers):
+            if worker.isRunning():
+                worker.wait(30000)
         super().closeEvent(event)

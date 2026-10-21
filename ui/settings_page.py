@@ -112,7 +112,7 @@ class SettingsPage(QWidget):
         shortcuts.setToolTip("Application-wide commands available from the keyboard")
         shortcuts_grid = QGridLayout(shortcuts)
         shortcuts_grid.setHorizontalSpacing(18)
-        shortcut_rows = (("Save frame as PNG", "Ctrl+P", "Close window", "Ctrl+W"),)
+        shortcut_rows = (("Save frame as PNG", "Ctrl+P", "Close video", "Ctrl+W"),)
         for row, values in enumerate(shortcut_rows):
             for column, value in enumerate(values):
                 label = QLabel(value)

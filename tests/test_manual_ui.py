@@ -181,9 +181,11 @@ class ManualUiTests(unittest.TestCase):
         try:
             window._video_opened(probe_video(self.video))
             job = window.right_panel.job
-            self.assertEqual([job.mode.itemText(row) for row in range(job.mode.count())], ["Exact cut", "Fast copy"])
-            self.assertIn("exact frame", job.mode.itemData(0, Qt.ToolTipRole))
-            self.assertIn("keyframe", job.mode.itemData(1, Qt.ToolTipRole))
+            self.assertEqual([job.mode.itemText(row) for row in range(job.mode.count())], ["Original quality", "Exact frames"])
+            self.assertEqual(job.mode.currentData(), "copy")
+            self.assertIn("identical", job.mode.itemData(0, Qt.ToolTipRole))
+            self.assertIn("exact frame", job.mode.itemData(1, Qt.ToolTipRole))
+            job.mode.setCurrentIndex(job.mode.findData("accurate"))
             self.assertEqual(job.destination.itemText(0), "Same folder as video")
             self.assertEqual(job.destination.itemData(job.destination.count() - 1), "__choose_folder__")
             job.arrangement.setCurrentIndex(job.arrangement.findData("compilation"))
@@ -213,7 +215,7 @@ class ManualUiTests(unittest.TestCase):
         target = Path(self.temporary.name) / "captured-frame.png"
         try:
             self.assertEqual(window.actions["screenshot"].shortcut(), QKeySequence("Ctrl+P"))
-            self.assertEqual(window.actions["close_window"].shortcut(), QKeySequence("Ctrl+W"))
+            self.assertEqual(window.actions["close_video"].shortcut(), QKeySequence("Ctrl+W"))
             self.assertFalse(window.actions["screenshot"].isEnabled())
             window._video_opened(probe_video(self.video))
             self.assertTrue(window.actions["screenshot"].isEnabled())
@@ -420,11 +422,13 @@ class ManualUiTests(unittest.TestCase):
                 dialog.done(QDialog.Accepted)
             self.assertEqual([item.kind for item in page.filters()], ["crop"])
             self.assertEqual(window.right_panel.job.mode.currentData(), "accurate")
-            self.assertFalse(window.right_panel.job.mode.model().item(1).isEnabled())
+            copy_row = window.right_panel.job.mode.findData("copy")
+            self.assertFalse(window.right_panel.job.mode.model().item(copy_row).isEnabled())
 
             page._remove_filter()
             self.assertEqual(page.filters(), [])
-            self.assertTrue(window.right_panel.job.mode.model().item(1).isEnabled())
+            self.assertTrue(window.right_panel.job.mode.model().item(copy_row).isEnabled())
+            self.assertEqual(window.right_panel.job.mode.currentData(), "copy")
 
             for category_row, available_row, expected in ((0, 1, "Rotate"), (1, 0, "Contrast")):
                 page.show_manager()

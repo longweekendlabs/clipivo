@@ -42,7 +42,13 @@ def export_ranges(
     video_encoder: str = "cpu",
     output_character: str = "",
     source_video_bitrate_kbps: int = 0,
+    output_name: str | None = None,
 ) -> list[Path]:
+    """Export enabled ranges; `output_name` is the base file name (no extension).
+
+    A stream copy can only start on a keyframe, so callers using copy mode
+    should pass ranges through `snap_to_keyframes` first.
+    """
     enabled = sorted((item for item in ranges if item.enabled), key=lambda item: item.start_ms)
     if not enabled:
         raise ExportError("No enabled clips are available to export.")
@@ -73,7 +79,7 @@ def export_ranges(
                     source, enabled, output_dir, mode, include_audio, progress,
                     cancel_event, logs, target, filters, source_fps,
                     resolved_encoder, video_encoder == "auto", encoder_label, output_tag,
-                    character_tail, source_video_bitrate_kbps,
+                    character_tail, source_video_bitrate_kbps, output_name,
                 )
             ]
         else:
@@ -88,10 +94,11 @@ def export_ranges(
                 )
                 clip_progress(0.0)
                 suffix = ".mp4"
+                base = output_name or f"{source.stem}_{output_tag}{character_tail}"
                 if len(enabled) == 1:
-                    generated_name = f"{source.stem}_{output_tag}{character_tail}{suffix}"
+                    generated_name = f"{base}{suffix}"
                 else:
-                    generated_name = f"{source.stem}_{output_tag}_{index:03d}{character_tail}{suffix}"
+                    generated_name = f"{base}_{index:03d}{suffix}"
                 clip_target = target or _unique_path(output_dir / generated_name)
                 _export_one(
                     source, clip, clip_target, mode, include_audio, cancel_event,
@@ -126,9 +133,11 @@ def _export_stitched(
     output_tag: str,
     character_tail: str,
     source_video_bitrate_kbps: int,
+    output_name: str | None = None,
 ) -> Path:
     suffix = ".mp4"
-    target = target or _unique_path(output_dir / f"{source.stem}_{output_tag}{character_tail}{suffix}")
+    base = output_name or f"{source.stem}_{output_tag}{character_tail}"
+    target = target or _unique_path(output_dir / f"{base}{suffix}")
     with tempfile.TemporaryDirectory(prefix=".clipivo-export-", dir=output_dir) as temporary:
         temp_dir = Path(temporary)
         segments: list[Path] = []
@@ -188,9 +197,10 @@ def _export_one(
     if duration <= 0:
         raise ExportError("A clip has an invalid zero-length range.")
     if mode == "copy":
+        # Seek 1 ms past the snapped keyframe so rounding never selects the previous one.
         command = [
             "ffmpeg", "-hide_banner", "-y",
-            "-ss", ffmpeg_time(clip.start_ms), "-i", str(source),
+            "-ss", ffmpeg_time(clip.start_ms + 1), "-i", str(source),
             "-t", ffmpeg_time(duration),
             "-map", "0:v:0",
         ]
@@ -217,7 +227,7 @@ def _export_one(
             audio_chain = audio_filtergraph(filters, source_fps)
             if audio_chain:
                 command.extend(["-af", audio_chain])
-            command.extend(["-c:a", "aac", "-b:a", "128k"])
+            command.extend(["-c:a", "aac", "-b:a", "192k"])
         command.extend(["-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(target)])
     else:
         raise ExportError(f"Unknown export mode: {mode}")
@@ -338,22 +348,61 @@ def _replace_nvenc_with_libx264(command: list[str], source_video_bitrate_kbps: i
 
 
 def _video_encoder_arguments(encoder: str, source_video_bitrate_kbps: int = 0) -> list[str]:
-    """Use sane perceptual quality while preventing small sources from exploding in size."""
+    """High-quality H.264 for exact-frame cuts (VMAF about 98 against the source).
+
+    The ceiling only stops a very compact source, such as AV1, from ballooning;
+    it sits far above what a near-transparent H.264 copy needs.
+    """
     source_rate = max(0, int(source_video_bitrate_kbps))
-    ceiling = max(500, round(source_rate * 1.15)) if source_rate else 0
+    ceiling = max(8_000, source_rate * 4) if source_rate else 0
     if encoder == "nvenc":
         arguments = [
-            "-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq",
-            "-rc", "vbr", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-profile:v", "high",
+            "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
         ]
     else:
         arguments = [
-            "-c:v", "libx264", "-preset", "medium", "-crf", "22",
+            "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
             "-pix_fmt", "yuv420p",
         ]
     if ceiling:
         arguments.extend(["-maxrate", f"{ceiling}k", "-bufsize", f"{ceiling * 2}k"])
     return arguments
+
+
+def keyframe_at_or_before(source: Path, milliseconds: int) -> int:
+    """Timestamp of the last keyframe at or before `milliseconds`, read from a small window."""
+    window_start = max(0.0, milliseconds / 1000 - 20)
+    completed = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+            "-read_intervals", f"{window_start:.3f}%{milliseconds / 1000 + 0.05:.3f}",
+            "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(source),
+        ],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    best = 0
+    for line in completed.stdout.split():
+        try:
+            value = round(float(line.strip(",")) * 1000)
+        except ValueError:
+            continue
+        if value <= milliseconds:
+            best = max(best, value)
+    return best
+
+
+def snap_to_keyframes(source: Path, ranges: list[ClipRange]) -> list[ClipRange]:
+    """Move each start back to its keyframe and merge clips that now overlap, so no footage repeats."""
+    snapped: list[ClipRange] = []
+    for item in sorted((clip for clip in ranges if clip.enabled), key=lambda clip: clip.start_ms):
+        clip = ClipRange.from_dict(item.to_dict())
+        clip.start_ms = keyframe_at_or_before(Path(source), clip.start_ms)
+        if snapped and clip.start_ms <= snapped[-1].end_ms:
+            snapped[-1].end_ms = max(snapped[-1].end_ms, clip.end_ms)
+            continue
+        snapped.append(clip)
+    return snapped
 
 
 def _check_cancel(event: Event) -> None:

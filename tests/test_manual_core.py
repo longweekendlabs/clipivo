@@ -59,13 +59,24 @@ class ManualCoreTests(unittest.TestCase):
         self.assertTrue(any(stream.kind == "audio" for stream in info.streams))
         self.assertGreater(info.video_bitrate_kbps, 0)
 
-    def test_source_bitrate_caps_accurate_reencoding(self) -> None:
+    def test_exact_frames_reencode_at_high_quality(self) -> None:
         arguments = export_module._video_encoder_arguments("cpu", 1000)
-        self.assertEqual(arguments[arguments.index("-maxrate") + 1], "1150k")
-        self.assertEqual(arguments[arguments.index("-bufsize") + 1], "2300k")
-        self.assertEqual(arguments[arguments.index("-crf") + 1], "22")
+        self.assertEqual(arguments[arguments.index("-crf") + 1], "16")
+        self.assertEqual(arguments[arguments.index("-maxrate") + 1], "8000k")
+        self.assertEqual(arguments[arguments.index("-profile:v") + 1], "high")
+        compact = export_module._video_encoder_arguments("cpu", 3000)
+        self.assertEqual(compact[compact.index("-maxrate") + 1], "12000k")
         nvenc = export_module._video_encoder_arguments("nvenc", 1000)
-        self.assertEqual(nvenc[nvenc.index("-cq") + 1], "23")
+        self.assertEqual(nvenc[nvenc.index("-cq") + 1], "19")
+        self.assertEqual(nvenc[nvenc.index("-preset") + 1], "p7")
+
+    def test_original_quality_snaps_starts_to_keyframes_and_merges_overlaps(self) -> None:
+        snapped = export_module.snap_to_keyframes(
+            self.video, [ClipRange(1500, 1800), ClipRange(1900, 2600), ClipRange(3200, 3600)]
+        )
+        self.assertEqual([(clip.start_ms, clip.end_ms) for clip in snapped], [(1000, 2600), (3000, 3600)])
+        outputs = export_ranges(self.video, snapped, self.root / "copy output", "copy", True, output_name="copy-test")
+        self.assertEqual(outputs[0].name, "copy-test.mp4")
 
     def test_exact_frame_steps(self) -> None:
         controller = VideoController(self.video)
@@ -136,11 +147,9 @@ class ManualCoreTests(unittest.TestCase):
             self.root / "character output",
             "accurate",
             False,
-            output_character="Merve Ekinci",
+            output_name="news.gvj96ngMgwY",
         )
-        self.assertEqual(len(outputs), 2)
-        self.assertTrue(outputs[0].stem.endswith("_001_Merve_Ekinci"))
-        self.assertTrue(outputs[1].stem.endswith("_002_Merve_Ekinci"))
+        self.assertEqual([path.stem for path in outputs], ["news.gvj96ngMgwY_001", "news.gvj96ngMgwY_002"])
 
     def test_single_clip_can_use_an_explicit_output_filename(self) -> None:
         target = self.root / "chosen name.mp4"

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
+### Added
+- Original quality is now the default: clips are copied from the source untouched, frame for frame, instead of being re-encoded. Each clip starts at the keyframe just before the person appears, usually a second or a few early, and clips that then overlap are merged so no footage repeats. It is also several times faster to save.
+- Each Batch video has its own Who column. Only the people listed there are looked for in that video, and Start refuses to run while any video has nobody chosen. The summary counts videos per person.
+- Batch accepts videos and folders dragged in from the file manager. The Video tab opens a video dropped onto it.
+- What happens to each original once its outputs are saved and checked: leave it, move it into a "Clipivo done" folder beside it, move it to a folder you choose, or move it to the Trash. Nothing is moved when a video failed, was cancelled, or when someone was not found.
+- File naming: video name + date, same as the video, custom name + video ID, or custom name + video ID + date, with a live example. The ID is read from downloader names such as "Title-gvj96ngMgwY" or "Title [id]". With "Same as video" and the original moved away, the output takes the original's name.
+- Close video (Ctrl+W), like Avidemux. Close window stays in the File menu; Ctrl+Q quits.
+- Rename and Delete person buttons beside a saved person's name, and the same on right-click.
+
+### Changed
+- Exact frames now re-encodes at high quality (about VMAF 98 against the source) instead of matching the source's bitrate, which visibly softened the picture (about VMAF 94). Files are larger.
+- Videos open at once. The keyframe index used for keyframe stepping was read from the whole file first, which took 15 seconds for an uncached file on a hard drive; it is now built in the background.
+- The Video tab no longer picks a saved person for you: it starts on "Choose who to find…".
+- Original quality is off while video filters are active, and comes back on when they are removed, without changing your saved choice.
+
+
 ## [0.3.0] - 2026-10-21
 
 ### Added

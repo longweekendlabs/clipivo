@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QProgressBar,
@@ -24,8 +25,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.batch import SOURCE_AFTER
 from core.character_store import CharacterStore
 from core.face_engine import FaceEngine
+from core.naming import DEFAULT_SCHEME, NAMING_SCHEMES, output_base_name
 
 from .native_dialogs import choose_directory, choose_images
 
@@ -102,6 +105,7 @@ class JobPanel(QWidget):
     startRequested = Signal()
     cancelRequested = Signal()
     pauseRequested = Signal()
+    applyToSelectedRequested = Signal()
 
     def __init__(
         self,
@@ -113,7 +117,7 @@ class JobPanel(QWidget):
         settings_key: str,
         start_text: str,
         frame_provider: Callable[[], QPixmap] | None = None,
-        show_trash: bool = False,
+        show_source_after: bool = False,
         show_pause: bool = False,
         parent=None,
     ):
@@ -127,6 +131,8 @@ class JobPanel(QWidget):
         self._start_text = start_text
         self._last_output_folder = ""
         self._custom_folder = ""
+        self._source_folder = ""
+        self._preview_source = Path("News broadcast-gvj96ngMgwY.mp4")
         self._check_worker: _PhotoCheckWorker | None = None
         self._one_time_listed = False
         self._loading = True
@@ -137,7 +143,7 @@ class JobPanel(QWidget):
 
         self.who_header = QHBoxLayout()
         self.who_header.setContentsMargins(0, 0, 0, 0)
-        who_title = QLabel("Who")
+        who_title = QLabel("Who · for videos you add" if multiple else "Who")
         who_title.setObjectName("sectionTitle")
         self.who_header.addWidget(who_title)
         self.who_header.addStretch()
@@ -147,10 +153,14 @@ class JobPanel(QWidget):
             self.people_list.setObjectName("batchCharacters")
             self.people_list.setMinimumHeight(84)
             self.people_list.setMaximumHeight(150)
-            self.people_list.setToolTip("Tick everyone Clipivo should find in every video")
+            self.people_list.setToolTip("Ticked people are given to videos you add next")
             self.people_list.itemChanged.connect(self._people_changed)
             self.people_list.currentItemChanged.connect(lambda *_args: self._update_photos())
             layout.addWidget(self.people_list)
+            self.apply_button = QPushButton("Give to selected videos")
+            self.apply_button.setToolTip("Replace who is looked for in the videos selected in the list")
+            self.apply_button.clicked.connect(self.applyToSelectedRequested.emit)
+            layout.addWidget(self.apply_button)
             self.person_combo = None
         else:
             self.person_combo = QComboBox()
@@ -213,29 +223,52 @@ class JobPanel(QWidget):
         self.arrangement.setToolTip("Join every appearance into one file, or save each one on its own")
         form.addRow("Save as", self.arrangement)
         self.mode = QComboBox()
-        self.mode.addItem("Exact cut", "accurate")
-        self.mode.addItem("Fast copy", "copy")
-        self.mode.setItemData(0, "Re-encodes to H.264/AAC so every clip starts and ends on the exact frame.", Qt.ToolTipRole)
-        self.mode.setItemData(1, "Keeps the source quality with no re-encode, but clip starts can shift to the nearest keyframe.", Qt.ToolTipRole)
-        self.mode.setToolTip("Exact cut follows frames precisely; fast copy keeps source quality")
-        form.addRow("Cut", self.mode)
+        self.mode.addItem("Original quality", "copy")
+        self.mode.addItem("Exact frames", "accurate")
+        self.mode.setItemData(
+            0, "Copies the original video untouched, so quality is identical. "
+            "Each clip starts at the keyframe just before, often a second or few early.", Qt.ToolTipRole,
+        )
+        self.mode.setItemData(
+            1, "Re-encodes at high quality so clips start and end on the exact frame. "
+            "Slower and the files are larger than the original.", Qt.ToolTipRole,
+        )
+        self.mode.setToolTip(self.mode.itemData(0, Qt.ToolTipRole))
+        form.addRow("Quality", self.mode)
         self.destination = QComboBox()
         self.destination.setToolTip("Where finished videos are saved; names end with the date, time and person")
         self.destination.activated.connect(self._destination_activated)
         form.addRow("Save to", self.destination)
-        for combo in (self.arrangement, self.mode, self.destination):
+        self.naming = QComboBox()
+        for key, label in NAMING_SCHEMES.items():
+            self.naming.addItem(label, key)
+        self.naming.setToolTip("How finished files are named. The video ID is read from names like 'Title-gvj96ngMgwY'.")
+        form.addRow("Name", self.naming)
+        self.custom_name = QLineEdit()
+        self.custom_name.setPlaceholderText("news")
+        self.custom_name.setToolTip("Your text at the start of each file name")
+        self.custom_name_row = form.rowCount()
+        form.addRow("Custom", self.custom_name)
+        self._form = form
+        self.source_after = None
+        if show_source_after:
+            self.source_after = QComboBox()
+            self.source_after.setToolTip(
+                "What happens to each original once all its outputs are saved and checked. "
+                "Nothing happens to a video that failed, was cancelled, or where nobody was found."
+            )
+            self.source_after.activated.connect(self._source_after_activated)
+            form.addRow("Original", self.source_after)
+        for combo in (self.arrangement, self.mode, self.destination, self.naming, *([self.source_after] if self.source_after else [])):
             combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         layout.addLayout(form)
+        self.name_preview = QLabel("")
+        self.name_preview.setObjectName("targetHint")
+        self.name_preview.setWordWrap(True)
+        layout.addWidget(self.name_preview)
         self.include_audio = QCheckBox("Include audio")
         self.include_audio.setChecked(True)
         layout.addWidget(self.include_audio)
-        self.trash_source = None
-        if show_trash:
-            self.trash_source = QCheckBox("Move each source to Trash when done")
-            self.trash_source.setToolTip(
-                "Only after every output for that video is saved and checked. Never deletes; you can restore from Trash."
-            )
-            layout.addWidget(self.trash_source)
 
         run_row = QHBoxLayout()
         run_row.setSpacing(4)
@@ -271,14 +304,16 @@ class JobPanel(QWidget):
         status_row.addWidget(self.open_folder_button, 0, Qt.AlignTop)
         layout.addLayout(status_row)
 
-        for combo in (self.arrangement, self.mode):
+        for combo in (self.arrangement, self.mode, self.naming):
             combo.currentIndexChanged.connect(self._settings_changed)
+        self.mode.currentIndexChanged.connect(lambda *_args: self.mode.setToolTip(self.mode.currentData(Qt.ToolTipRole)))
+        self.naming.currentIndexChanged.connect(lambda *_args: self._update_naming())
+        self.custom_name.textChanged.connect(lambda *_args: (self._update_naming(), self._settings_changed()))
         self.include_audio.toggled.connect(self._settings_changed)
-        if self.trash_source:
-            self.trash_source.toggled.connect(self._settings_changed)
         self.one_time.changed.connect(self.refresh_people)
 
         self._load_settings()
+        self._update_naming()
         self.refresh_people()
         self.set_running(False)
         self.progress.hide()
@@ -312,8 +347,7 @@ class JobPanel(QWidget):
             previous = select_id or self.selected_id()
             self.person_combo.blockSignals(True)
             self.person_combo.clear()
-            if not people:
-                self.person_combo.addItem("Add photos to start", None)
+            self.person_combo.addItem("Add photos to start" if not people else "Choose who to find…", None)
             for person in people:
                 self.person_combo.addItem(f"{person.name}  ·  {self._photo_count(person)} photos", person)
             index = next(
@@ -468,7 +502,10 @@ class JobPanel(QWidget):
             "save_next_to_source": destination == SAME_FOLDER,
             "output_dir": "" if destination == SAME_FOLDER else str(destination or ""),
             "include_audio": self.include_audio.isChecked(),
-            "trash_after_success": bool(self.trash_source and self.trash_source.isChecked()),
+            "naming": str(self.naming.currentData()),
+            "custom_name": self.custom_name.text().strip(),
+            "source_after": str(self.source_after.currentData()) if self.source_after else "keep",
+            "source_folder": self._source_folder,
         }
 
     def set_values(self, values: dict) -> None:
@@ -478,19 +515,33 @@ class JobPanel(QWidget):
         self._custom_folder = str(values.get("output_dir", "") or "")
         self._rebuild_destinations(SAME_FOLDER if values.get("save_next_to_source", True) or not self._custom_folder else self._custom_folder)
         self.include_audio.setChecked(bool(values.get("include_audio", True)))
-        if self.trash_source:
-            self.trash_source.setChecked(bool(values.get("trash_after_success", False)))
+        self.naming.setCurrentIndex(max(0, self.naming.findData(values.get("naming", DEFAULT_SCHEME))))
+        self.custom_name.setText(str(values.get("custom_name", "") or ""))
+        if self.source_after:
+            self._source_folder = str(values.get("source_folder", "") or "")
+            self._rebuild_source_after(str(values.get("source_after", "keep")))
+        self._update_naming()
         self._loading = False
 
     def set_copy_allowed(self, allowed: bool) -> None:
-        item = self.mode.model().item(1) if hasattr(self.mode.model(), "item") else None
+        """Filters need re-encoding; switch to exact frames without changing the saved preference."""
+        model = self.mode.model()
+        copy_row = self.mode.findData("copy")
+        item = model.item(copy_row) if hasattr(model, "item") else None
         if item is not None:
             item.setEnabled(allowed)
+        was_loading = self._loading
+        self._loading = True
         if not allowed and self.mode.currentData() == "copy":
-            self.mode.setCurrentIndex(0)
+            self._forced_exact = True
+            self.mode.setCurrentIndex(self.mode.findData("accurate"))
+        elif allowed and getattr(self, "_forced_exact", False):
+            self._forced_exact = False
+            self.mode.setCurrentIndex(copy_row)
+        self._loading = was_loading
         self.mode.setToolTip(
-            "Exact cut follows frames precisely; fast copy keeps source quality"
-            if allowed else "Active video filters need re-encoding, so fast copy is off"
+            self.mode.currentData(Qt.ToolTipRole) if allowed
+            else "Active video filters need re-encoding, so original quality is off"
         )
 
     def _rebuild_destinations(self, select) -> None:
@@ -529,20 +580,63 @@ class JobPanel(QWidget):
         prefix = f"{self.settings_key}/"
         self.set_values({
             "arrangement": settings.value(prefix + "arrangement", "compilation"),
-            "mode": settings.value(prefix + "mode", "accurate"),
+            # A new key: 0.3.0 saved "mode" with a re-encoding default.
+            "mode": settings.value(prefix + "quality", "copy"),
             "save_next_to_source": settings.value(prefix + "save_next_to_source", True, bool),
             "output_dir": settings.value(prefix + "output_dir", ""),
             "include_audio": settings.value(prefix + "include_audio", True, bool),
-            "trash_after_success": False,
+            "naming": settings.value(prefix + "naming", DEFAULT_SCHEME),
+            "custom_name": settings.value(prefix + "custom_name", ""),
         })
 
     def _save_settings(self) -> None:
         settings = QSettings()
         prefix = f"{self.settings_key}/"
         values = self.values()
-        for key in ("arrangement", "mode", "save_next_to_source", "include_audio"):
+        for key in ("arrangement", "save_next_to_source", "include_audio", "naming", "custom_name"):
             settings.setValue(prefix + key, values[key])
+        settings.setValue(prefix + "quality", values["mode"])
         settings.setValue(prefix + "output_dir", self._custom_folder)
+
+    def set_preview_source(self, source: Path | None) -> None:
+        if source:
+            self._preview_source = Path(source)
+        self._update_naming()
+
+    def _update_naming(self) -> None:
+        scheme = str(self.naming.currentData())
+        custom = scheme.startswith("custom")
+        self._form.setRowVisible(self.custom_name_row, custom)
+        example = output_base_name(self._preview_source, scheme, self.custom_name.text())
+        self.name_preview.setText(f"For example: {example}.mp4")
+        self.name_preview.setToolTip(
+            "Separate clips add _001, _002 and so on. When one video is searched for several people, "
+            "each file also ends with the person's name."
+        )
+
+    def _rebuild_source_after(self, select: str) -> None:
+        self.source_after.blockSignals(True)
+        self.source_after.clear()
+        for key, label in SOURCE_AFTER.items():
+            if key == "folder" and self._source_folder:
+                label = f"Move to {self._short_path(self._source_folder)}"
+            self.source_after.addItem(label, key)
+        if self._source_folder:
+            self.source_after.addItem("Choose a different folder…", CHOOSE_FOLDER)
+        self.source_after.setCurrentIndex(max(0, self.source_after.findData(select)))
+        self.source_after.blockSignals(False)
+
+    def _source_after_activated(self, _index: int) -> None:
+        choice = self.source_after.currentData()
+        if choice == CHOOSE_FOLDER or (choice == "folder" and not self._source_folder):
+            folder = choose_directory(self, "Move finished originals to", key=f"{self.settings_key}_source_folder")
+            if folder:
+                self._source_folder = folder
+                choice = "folder"
+            else:
+                choice = "folder" if self._source_folder else "keep"
+            self._rebuild_source_after(choice)
+        self._settings_changed()
 
     # Running --------------------------------------------------------------
 
@@ -553,14 +647,15 @@ class JobPanel(QWidget):
         if self.pause_button:
             self.pause_button.setVisible(running)
             self.pause_button.setText("Resume" if paused else "Pause")
-        for widget in (self.arrangement, self.mode, self.destination, self.include_audio, self.add_photos_button):
+        for widget in (self.arrangement, self.mode, self.destination, self.include_audio, self.add_photos_button,
+                       self.naming, self.custom_name, *([self.source_after] if self.source_after else [])):
             widget.setEnabled(not running)
+        if self.people_list is not None:
+            self.apply_button.setEnabled(not running)
         if self.person_combo is not None:
             self.person_combo.setEnabled(not running)
         if self.people_list is not None:
             self.people_list.setEnabled(not running)
-        if self.trash_source:
-            self.trash_source.setEnabled(not running)
         if self.grab_frame_button:
             self.grab_frame_button.setEnabled(not running)
         if running:

@@ -52,31 +52,76 @@ class BatchUiTests(unittest.TestCase):
     def test_batch_page_queues_videos_and_people(self) -> None:
         page = BatchPage(self.store, AvailableEngine())
         try:
+            self.assertEqual(page.job.source_after.currentData(), "keep")
+            self.assertIn("Move to Trash", [page.job.source_after.itemText(row) for row in range(page.job.source_after.count())])
+            page.characters.item(0).setCheckState(Qt.Checked)
             page.add_paths([self.video, self.video])
             self.assertEqual(page.queue.rowCount(), 1)
             self.assertEqual(page.queue.item(0, 1).text(), "source video.mp4")
-            self.assertFalse(page.trash_source.isChecked())
-            self.assertIn("Trash", page.trash_source.toolTip())
-            page.characters.item(0).setCheckState(Qt.Checked)
-            self.assertEqual(len(page._selected_character_ids()), 1)
-            self.assertIn("1 video", page.summary.text())
-            self.assertIn("1 person", page.summary.text())
+            self.assertEqual(page.configuration.videos[0].person_ids, [self.alex.id])
+            self.assertEqual(page.queue.cellWidget(0, 2).text(), "Alex")
+            self.assertIn("Alex 1", page.summary.text())
+
+            second = self.root / "second.mkv"
+            second.write_bytes(b"video")
+            page.characters.item(0).setCheckState(Qt.Unchecked)
+            page.add_dropped([self.root])
+            self.assertEqual(page.queue.rowCount(), 2)
+            self.assertEqual(page.queue.cellWidget(1, 2).text(), "Choose who…")
+            self.assertIn("1 without anyone", page.summary.text())
+            with patch("ui.batch_page.QMessageBox.information") as told:
+                page._start()
+            self.assertIn("second.mkv", told.call_args.args[2])
+            self.assertIsNone(page.worker)
+
             page.one_time.add([("guest.png", b"guest")])
-            labels = [page.characters.item(row).text() for row in range(page.characters.count())]
-            self.assertTrue(labels[-1].startswith("One-time person"))
-            self.assertEqual(page.characters.item(page.characters.count() - 1).checkState(), Qt.Checked)
-            self.assertEqual(len(page._selected_character_ids()), 2)
+            page.queue.selectRow(1)
+            for row in range(page.characters.count()):
+                item = page.characters.item(row)
+                item.setCheckState(Qt.Checked if item.text().startswith(("Sam", "One-time")) else Qt.Unchecked)
+            page._apply_people_to_selected()
+            self.assertEqual(sorted(page.configuration.videos[1].person_ids), sorted([self.sam.id, "__one_time__"]))
+            self.assertEqual(page.configuration.videos[0].person_ids, [self.alex.id])
         finally:
             page.close()
+
+    def test_each_video_is_searched_only_for_its_own_people(self) -> None:
+        other = self.root / "other.mp4"
+        other.write_bytes(b"video")
+        configuration = BatchConfiguration(
+            videos=[
+                BatchVideoEntry(str(self.video), person_ids=[self.alex.id]),
+                BatchVideoEntry(str(other), person_ids=[self.sam.id]),
+            ],
+            mode="accurate",
+        )
+        targets = [
+            BatchCharacterTarget(self.alex.id, self.alex.name, [("alex.jpg", b"alex")], 0.4),
+            BatchCharacterTarget(self.sam.id, self.sam.name, [("sam.jpg", b"sam")], 0.4),
+        ]
+        seen = []
+
+        def fake_analyse(source, _engine, entry_targets, **_kwargs):
+            seen.append((Path(source).name, [target.name for target in entry_targets]))
+            return [CharacterAppearances(target.id, target.name, (), ()) for target in entry_targets]
+
+        worker = BatchExecutionWorker(configuration, targets, AvailableEngine())
+        with (
+            patch("ui.batch_page.probe_video", return_value=type("Info", (), {"duration_ms": 4000, "fps": 25.0})()),
+            patch("ui.batch_page.analyse_video_for_characters", side_effect=fake_analyse),
+        ):
+            worker.run()
+        self.assertEqual(seen, [("source video.mp4", ["Alex"]), ("other.mp4", ["Sam"])])
 
     def test_worker_exports_each_character_then_trashes_only_after_validation(self) -> None:
         output_dir = self.root / "outputs"
         configuration = BatchConfiguration(
-            videos=[BatchVideoEntry(str(self.video))],
+            videos=[BatchVideoEntry(str(self.video), person_ids=[self.alex.id, self.sam.id])],
             output_dir=str(output_dir),
             arrangement="compilation",
-            trash_after_success=True,
+            source_after="trash",
             save_next_to_source=False,
+            mode="accurate",
         )
         targets = [
             BatchCharacterTarget(self.alex.id, self.alex.name, [("alex.jpg", b"alex")], 0.4),
@@ -103,7 +148,7 @@ class BatchUiTests(unittest.TestCase):
             patch("ui.batch_page.analyse_video_for_characters", return_value=results),
             patch("ui.batch_page.export_ranges", side_effect=fake_export) as export,
             patch("ui.batch_page.validate_export") as validate,
-            patch("ui.batch_page.move_source_to_trash") as trash,
+            patch("core.batch.move_source_to_trash") as trash,
         ):
             worker.run()
         self.assertEqual([call.kwargs["output_character"] for call in export.call_args_list], ["Alex", "Sam"])
@@ -124,9 +169,9 @@ class BatchUiTests(unittest.TestCase):
 
     def test_no_match_never_trashes_source(self) -> None:
         configuration = BatchConfiguration(
-            videos=[BatchVideoEntry(str(self.video))],
+            videos=[BatchVideoEntry(str(self.video), person_ids=[self.alex.id])],
             output_dir=str(self.root / "outputs"),
-            trash_after_success=True,
+            source_after="trash",
         )
         target = BatchCharacterTarget(self.alex.id, self.alex.name, [("alex.jpg", b"alex")], 0.4)
         result = CharacterAppearances(target.id, target.name, (), ())
@@ -136,7 +181,7 @@ class BatchUiTests(unittest.TestCase):
         with (
             patch("ui.batch_page.probe_video", return_value=type("Info", (), {"duration_ms": 4000, "fps": 25.0})()),
             patch("ui.batch_page.analyse_video_for_characters", return_value=[result]),
-            patch("ui.batch_page.move_source_to_trash") as trash,
+            patch("core.batch.move_source_to_trash") as trash,
         ):
             worker.run()
         trash.assert_not_called()
@@ -144,9 +189,9 @@ class BatchUiTests(unittest.TestCase):
 
     def test_failed_tail_validation_removes_bad_output_and_keeps_source(self) -> None:
         configuration = BatchConfiguration(
-            videos=[BatchVideoEntry(str(self.video))],
+            videos=[BatchVideoEntry(str(self.video), person_ids=[self.alex.id])],
             output_dir=str(self.root / "outputs"),
-            trash_after_success=True,
+            source_after="trash",
         )
         target = BatchCharacterTarget(self.alex.id, self.alex.name, [("alex.jpg", b"alex")], 0.4)
         result = CharacterAppearances(
@@ -169,7 +214,7 @@ class BatchUiTests(unittest.TestCase):
             patch("ui.batch_page.analyse_video_for_characters", return_value=[result]),
             patch("ui.batch_page.export_ranges", side_effect=fake_export),
             patch("ui.batch_page.validate_export", side_effect=RuntimeError("tail decode failed")),
-            patch("ui.batch_page.move_source_to_trash") as trash,
+            patch("core.batch.move_source_to_trash") as trash,
         ):
             worker.run()
         self.assertFalse(bad_output.exists())
