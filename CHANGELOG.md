@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## [Unreleased]
+
+## [0.3.0] - 2026-10-21
+
+### Added
+- One simple panel on the Video tab: pick who to find, choose how to save, press Start. Clipivo scans the whole video, saves the result and checks it on its own, while the window stays free to use. Progress, the number of clips found and an Open folder button appear right in the pane.
+- Save to "Same folder as video" or a folder you choose, on both the Video tab and Batch. Files are named after the source video with the date and time added, plus the person's name for saved people.
+- One-time people: add a few screenshots or grab the frame on screen, use them in Video or Batch, and they are gone when Clipivo closes. Nothing is written to disk.
+- Found clips get thumbnails in the clip list, and the timeline marks every appearance.
+- Batch shows overall progress in the same panel and can clear finished videos from the list.
+
+### Changed
+- Batch now uses the same Who, Output and Start panel as the Video tab. Encoder choice lives in Settings only.
+- People is now just your library of saved people. The per-video ad-hoc box and "Use for this video" are gone; old ad-hoc characters stay on disk but are no longer shown.
+- Appearance scans check faces at 1280 px, so small faces in wide studio shots are found. A presenter seen only from across the studio was missed at 640 px.
+- Reading the video and checking faces now overlap instead of taking turns, which shortens scans without changing what they find.
+- Fast copy and exact cut are named for what they do. Clip rows say Found, Found · unsure or Manual.
+
+### Removed
+- The Batch "Review" column and the approve-in-editor hand-off. Start does the whole job; open a finished video in the editor if you want to adjust clips and save again.
+
+## [0.2.0] - 2026-07-24
 
 - Added a reproducible private Fedora x86_64 RPM build with a vendored tested runtime, local face models, desktop entry, application icon, and system launcher.
 - Removed hidden Batch lead-in/out padding, added 200 ms local entrance/exit refinement, and merged overlapping automatic ranges to prevent duplicate footage.

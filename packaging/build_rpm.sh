@@ -4,15 +4,20 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 version="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "$project_dir/version.py")"
 release="${CLIPIVO_RPM_RELEASE:-1.local.$(date +%Y%m%d)}"
-topdir="$project_dir/packaging/rpmbuild"
+# Scratch space for staging and rpmbuild; set it outside synced folders.
+work_dir="${CLIPIVO_BUILD_DIR:-$project_dir/packaging}"
+mkdir -p "$work_dir"
+topdir="$work_dir/rpmbuild"
 dist_dir="$project_dir/dist"
 rpm_tmpdir="/tmp/clipivo-rpm-tmp"
-stage_parent="$(mktemp -d "$project_dir/packaging/.rpm-stage.XXXXXX")"
+stage_parent="$(mktemp -d "$work_dir/.rpm-stage.XXXXXX")"
 stage="$stage_parent/clipivo-$version"
+# The tested runtime to vendor; defaults to the project's own .venv.
+venv="${CLIPIVO_VENV:-$project_dir/.venv}"
 
 trap 'rm -rf -- "$stage_parent"' EXIT
 
-if [[ -z "$version" || ! -x "$project_dir/.venv/bin/python" ]]; then
+if [[ -z "$version" || ! -x "$venv/bin/python" ]]; then
     echo "Clipivo version or tested virtual environment is missing." >&2
     exit 1
 fi
@@ -42,7 +47,7 @@ rsync -a \
     --exclude 'pkg_resources/' \
     --exclude '_distutils_hack/' \
     --exclude 'distutils-precedence.pth' \
-    "$project_dir/.venv/lib/" "$stage/.venv/lib/"
+    "$venv/lib/" "$stage/.venv/lib/"
 
 tar --zstd -cf "$topdir/SOURCES/clipivo-$version.tar.zst" -C "$stage_parent" "clipivo-$version"
 cp "$project_dir/packaging/clipivo-launcher" "$topdir/SOURCES/clipivo-launcher"

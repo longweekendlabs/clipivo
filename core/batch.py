@@ -8,6 +8,8 @@ import subprocess
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from queue import Empty, Full, Queue
+from threading import Event, Thread
 from typing import Callable
 from uuid import uuid4
 
@@ -15,6 +17,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
+from .timecode import format_duration
 from .video_probe import probe_video
 
 
@@ -165,6 +168,74 @@ def safe_name_component(value: str) -> str:
     return normalized or "Character"
 
 
+class _SampledFrames(Thread):
+    """Decode one frame per interval ahead of the consumer, bounded so memory stays small."""
+
+    _DONE = object()
+
+    def __init__(self, source: Path, interval_ms: int, skip_frame: str, stop: Event):
+        super().__init__(daemon=True)
+        self.source = source
+        self.interval_ms = interval_ms
+        self.skip_frame = skip_frame
+        self.stop = stop
+        self.queue: Queue = Queue(maxsize=6)
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            container = av.open(str(self.source))
+            try:
+                try:
+                    stream = container.streams.video[0]
+                except IndexError as exc:
+                    raise RuntimeError("The selected file has no decodable video stream.") from exc
+                stream.thread_type = "AUTO"
+                stream.codec_context.skip_frame = self.skip_frame
+                next_sample_ms = 0
+                for frame in container.decode(stream):
+                    if self.stop.is_set():
+                        break
+                    if frame.pts is None:
+                        continue
+                    timestamp_ms = max(0, round(float(frame.pts * stream.time_base) * 1000))
+                    if timestamp_ms < next_sample_ms:
+                        continue
+                    while next_sample_ms <= timestamp_ms:
+                        next_sample_ms += self.interval_ms
+                    if not self._put((timestamp_ms, frame.to_ndarray(format="bgr24"))):
+                        break
+            finally:
+                container.close()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer
+            self.error = exc
+        finally:
+            self._put(self._DONE)
+
+    def _put(self, item) -> bool:
+        while not self.stop.is_set():
+            try:
+                self.queue.put(item, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
+
+    def __iter__(self):
+        while True:
+            try:
+                item = self.queue.get(timeout=0.1)
+            except Empty:
+                if not self.is_alive() and self.queue.empty():
+                    break
+                continue
+            if item is self._DONE:
+                break
+            yield item
+        if self.error is not None:
+            raise self.error
+
+
 def analyse_video_for_characters(
     source: Path,
     face_engine: FaceEngine,
@@ -190,29 +261,16 @@ def analyse_video_for_characters(
         for target in targets
     }
     hits: dict[str, list[AppearanceHit]] = {target.id: [] for target in targets}
-    next_sample_ms = 0
     last_progress_ms = -1
-    container = av.open(str(Path(source)))
+    stop = Event()
+    # Decoding runs on the CPU while faces are matched on the GPU; overlapping
+    # the two instead of alternating them is most of the scan's speed.
+    frames = _SampledFrames(Path(source), interval_ms, skip_frame, stop)
+    frames.start()
     try:
-        try:
-            stream = container.streams.video[0]
-        except IndexError as exc:
-            raise RuntimeError("The selected file has no decodable video stream.") from exc
-        stream.thread_type = "AUTO"
-        stream.codec_context.skip_frame = skip_frame
-        for frame in container.decode(stream):
-            if cancelled and cancelled():
+        for timestamp_ms, image in frames:
+            if (cancelled and cancelled()) or (wait_if_paused and not wait_if_paused()):
                 break
-            if wait_if_paused and not wait_if_paused():
-                break
-            if frame.pts is None:
-                continue
-            timestamp_ms = max(0, round(float(frame.pts * stream.time_base) * 1000))
-            if timestamp_ms < next_sample_ms:
-                continue
-            while next_sample_ms <= timestamp_ms:
-                next_sample_ms += interval_ms
-            image = frame.to_ndarray(format="bgr24")
             matcher = getattr(face_engine, "match_frame_many", None)
             if callable(matcher):
                 assessments = matcher(image, matrices)
@@ -225,12 +283,13 @@ def analyse_video_for_characters(
                 if assessment.matched:
                     hits[target_id].append(AppearanceHit(timestamp_ms, assessment.score))
             if progress and (last_progress_ms < 0 or timestamp_ms - last_progress_ms >= 500):
-                progress(timestamp_ms, duration_ms, "Analysing faces")
+                progress(timestamp_ms, duration_ms, f"Scanning {format_duration(timestamp_ms)} / {format_duration(duration_ms)}")
                 last_progress_ms = timestamp_ms
     finally:
-        container.close()
+        stop.set()
+        frames.join()
     if progress:
-        progress(duration_ms, duration_ms, "Analysis complete")
+        progress(duration_ms, duration_ms, "Scan complete")
     results: list[CharacterAppearances] = []
     for target in targets:
         target_hits = hits[target.id]

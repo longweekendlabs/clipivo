@@ -109,15 +109,11 @@ class BatchExecutionWorker(QThread):
             duration_ms=info.duration_ms,
             cancelled=self._cancelled,
             wait_if_paused=self._wait_if_paused,
-            progress=lambda current, total, _label: self.entryUpdated.emit(
-                entry.id,
-                "analysing",
-                min(70, round(current / max(1, total) * 70)),
-                f"Scanning {format_duration(current)} / {format_duration(total)}",
-                [],
+            progress=lambda current, total, label: self.entryUpdated.emit(
+                entry.id, "analysing", min(70, round(current / max(1, total) * 70)), label, [],
             ),
             refine_progress=lambda done, total: self.entryUpdated.emit(
-                entry.id, "analysing", 70, f"Tightening clip edges {done + 1} of {total}", [],
+                entry.id, "analysing", 63 + round(done / max(1, total) * 7), f"Tightening clip edges {done + 1} of {total}", [],
             ),
         )
         if self._cancelled():
