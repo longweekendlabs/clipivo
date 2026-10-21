@@ -17,6 +17,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
+from .framing import FRAMINGS, MAX_SIZES, subject_from_hits
 from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
@@ -91,6 +92,10 @@ class BatchConfiguration:
     source_folder: str = ""
     naming: str = "source_date"
     custom_name: str = ""
+    # 100 copies the original; lower re-encodes smaller. Size limits the shorter side.
+    output_quality: int = 100
+    max_short_side: int = 0
+    framing: str = "whole"
 
     def output_dir_for(self, source: Path) -> Path:
         if self.save_next_to_source or not self.output_dir:
@@ -126,6 +131,9 @@ class BatchConfiguration:
             source_folder=str(payload.get("source_folder", "")),
             naming=naming if naming in NAMING_SCHEMES else "source_date",
             custom_name=str(payload.get("custom_name", "")),
+            output_quality=max(50, min(100, int(payload.get("output_quality", 100)))),
+            max_short_side=int(payload.get("max_short_side", 0)) if int(payload.get("max_short_side", 0)) in MAX_SIZES else 0,
+            framing=str(payload.get("framing", "whole")) if payload.get("framing") in FRAMINGS else "whole",
         )
 
 
@@ -141,6 +149,8 @@ class BatchCharacterTarget:
 class AppearanceHit:
     timestamp_ms: int
     score: float
+    box: tuple[float, float, float, float] | None = None
+    frame_size: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -305,7 +315,10 @@ def analyse_video_for_characters(
                 }
             for target_id, assessment in assessments.items():
                 if assessment.matched:
-                    hits[target_id].append(AppearanceHit(timestamp_ms, assessment.score))
+                    hits[target_id].append(AppearanceHit(
+                        timestamp_ms, assessment.score, getattr(assessment, "box", None),
+                        (int(image.shape[1]), int(image.shape[0])),
+                    ))
             if progress and (last_progress_ms < 0 or timestamp_ms - last_progress_ms >= 500):
                 progress(timestamp_ms, duration_ms, f"Scanning {format_duration(timestamp_ms)} / {format_duration(duration_ms)}")
                 last_progress_ms = timestamp_ms
@@ -331,6 +344,10 @@ def analyse_video_for_characters(
             wait_if_paused,
             refine_progress,
         )
+        for clip in ranges:
+            clip.subject = subject_from_hits(
+                [hit for hit in target_hits if clip.start_ms <= hit.timestamp_ms <= clip.end_ms]
+            )
         results.append(CharacterAppearances(
             target.id,
             target.name,

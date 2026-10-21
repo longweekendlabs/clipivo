@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-21
+
+### Added
+- Size: keep the original size, or limit output to 1440p, 1080p or 720p. The limit applies to the shorter side, so a 16:9 4K video becomes 1920x1080, a 4:3 4K video 1440x1080 and a vertical video 1080x1920. Smaller videos are never enlarged.
+- Frame: Whole picture, or Follow person in landscape, portrait or square. Each clip is cropped steadily around where the person's face was found, such as their half of a split screen, and every clip is scaled to the same size so a stitched video never changes shape. Clips marked by hand are cropped from the centre.
+- Quality slider from 50% to 100%. 100% copies the original untouched; lower values re-encode on the exact frames into smaller files. Resizing and following a person re-encode at 95% when the slider is at 100%.
+- The same Size, Frame and Quality options on the Video tab and in Batch, with one line explaining what will happen.
+
+### Changed
+- Face matches now remember where the face was in the frame, and found clips keep a summary of it, so framing can be changed after a scan and saved again.
+
 ## [0.4.1] - 2026-10-21
 
 ### Added

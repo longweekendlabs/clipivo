@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -9,12 +10,38 @@ from threading import Event, Thread
 from typing import Callable
 
 from .filters import VideoFilter, active_filters, audio_filtergraph, video_filtergraph
+from .framing import crop_box, output_size, scale_filter
 from .models import ClipRange
 from .timecode import ffmpeg_time
 
 
 class ExportError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class OutputShape:
+    """How re-encoded output looks: quality (50-100), size limit on the shorter side, framing."""
+
+    quality: int = 95
+    max_short_side: int = 0
+    framing: str = "whole"
+    frame_size: tuple[int, int] = (0, 0)
+
+    def needs_reencode(self) -> bool:
+        width, height = self.frame_size
+        too_big = bool(self.max_short_side) and min(width, height) > self.max_short_side
+        return self.quality < 100 or too_big or self.framing != "whole"
+
+    def chain_for(self, clip: ClipRange) -> tuple[str, str]:
+        """(before user filters, after user filters) for one clip."""
+        if self.framing != "whole" and all(self.frame_size):
+            x, y, w, h = crop_box(clip.subject, self.framing, self.frame_size)
+            out_w, out_h = output_size(self.framing, self.max_short_side)
+            return f"crop={w}:{h}:{x}:{y}", f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
+        if self.max_short_side:
+            return "", scale_filter(self.max_short_side)
+        return "", ""
 
 
 ProgressFn = Callable[[int, int, str], None]
@@ -43,6 +70,7 @@ def export_ranges(
     output_character: str = "",
     source_video_bitrate_kbps: int = 0,
     output_name: str | None = None,
+    shape: OutputShape | None = None,
 ) -> list[Path]:
     """Export enabled ranges; `output_name` is the base file name (no extension).
 
@@ -65,7 +93,7 @@ def export_ranges(
     filters = active_filters(filters)
     output_tag = date_tag()
     character_tail = f"_{_safe_output_component(output_character)}" if output_character else ""
-    if filters:
+    if filters or (shape and shape.needs_reencode()):
         mode = "accurate"
     try:
         resolved_encoder = _resolve_video_encoder(video_encoder) if mode == "accurate" else "cpu"
@@ -79,7 +107,7 @@ def export_ranges(
                     source, enabled, output_dir, mode, include_audio, progress,
                     cancel_event, logs, target, filters, source_fps,
                     resolved_encoder, video_encoder == "auto", encoder_label, output_tag,
-                    character_tail, source_video_bitrate_kbps, output_name,
+                    character_tail, source_video_bitrate_kbps, output_name, shape,
                 )
             ]
         else:
@@ -103,7 +131,7 @@ def export_ranges(
                 _export_one(
                     source, clip, clip_target, mode, include_audio, cancel_event,
                     logs, filters, source_fps, resolved_encoder,
-                    video_encoder == "auto", clip_progress, source_video_bitrate_kbps,
+                    video_encoder == "auto", clip_progress, source_video_bitrate_kbps, shape,
                 )
                 result.append(clip_target)
             progress(total_units, total_units, "Export complete")
@@ -134,6 +162,7 @@ def _export_stitched(
     character_tail: str,
     source_video_bitrate_kbps: int,
     output_name: str | None = None,
+    shape: OutputShape | None = None,
 ) -> Path:
     suffix = ".mp4"
     base = output_name or f"{source.stem}_{output_tag}{character_tail}"
@@ -154,7 +183,7 @@ def _export_stitched(
             _export_one(
                 source, clip, segment, mode, include_audio, cancel_event, logs,
                 filters, source_fps, video_encoder, allow_encoder_fallback,
-                segment_progress, source_video_bitrate_kbps,
+                segment_progress, source_video_bitrate_kbps, shape,
             )
             segments.append(segment)
 
@@ -192,7 +221,9 @@ def _export_one(
     allow_encoder_fallback: bool,
     progress_fraction: FractionFn | None,
     source_video_bitrate_kbps: int = 0,
+    shape: OutputShape | None = None,
 ) -> None:
+    shape = shape or OutputShape()
     duration = clip.duration_ms
     if duration <= 0:
         raise ExportError("A clip has an invalid zero-length range.")
@@ -216,13 +247,13 @@ def _export_one(
         ]
         if include_audio:
             command.extend(["-map", "0:a:0?"])
-        video_chain = video_filtergraph(filters, source_fps)
+        before, after = shape.chain_for(clip)
+        video_chain = ",".join(part for part in (before, video_filtergraph(filters, source_fps), after) if part)
         if video_chain:
             command.extend(["-vf", video_chain])
-        if video_encoder == "nvenc":
-            command.extend(_video_encoder_arguments("nvenc", source_video_bitrate_kbps))
-        else:
-            command.extend(_video_encoder_arguments("cpu", source_video_bitrate_kbps))
+        command.extend(_video_encoder_arguments(
+            "nvenc" if video_encoder == "nvenc" else "cpu", source_video_bitrate_kbps, shape.quality,
+        ))
         if include_audio:
             audio_chain = audio_filtergraph(filters, source_fps)
             if audio_chain:
@@ -238,7 +269,7 @@ def _export_one(
             if video_encoder != "nvenc" or not allow_encoder_fallback or cancel_event.is_set():
                 raise
             logs.append("NVIDIA NVENC failed; retrying this clip with CPU libx264.")
-            cpu_command = _replace_nvenc_with_libx264(command, source_video_bitrate_kbps)
+            cpu_command = _replace_nvenc_with_libx264(command, source_video_bitrate_kbps, shape.quality)
             _run(cpu_command, cancel_event, logs, duration, progress_fraction)
     except Exception:
         target.unlink(missing_ok=True)
@@ -335,34 +366,36 @@ def _resolve_video_encoder(preference: str) -> str:
     raise ExportError(f"Unknown video encoder preference: {preference}")
 
 
-def _replace_nvenc_with_libx264(command: list[str], source_video_bitrate_kbps: int = 0) -> list[str]:
+def _replace_nvenc_with_libx264(command: list[str], source_video_bitrate_kbps: int = 0, quality: int = 95) -> list[str]:
     start = command.index("-c:v")
     end = start + 2
     while end < len(command) and command[end] not in {"-c:a", "-af", "-movflags"}:
         end += 1
     return [
         *command[:start],
-        *_video_encoder_arguments("cpu", source_video_bitrate_kbps),
+        *_video_encoder_arguments("cpu", source_video_bitrate_kbps, quality),
         *command[end:],
     ]
 
 
-def _video_encoder_arguments(encoder: str, source_video_bitrate_kbps: int = 0) -> list[str]:
-    """High-quality H.264 for exact-frame cuts (VMAF about 98 against the source).
+def _video_encoder_arguments(encoder: str, source_video_bitrate_kbps: int = 0, quality: int = 95) -> list[str]:
+    """H.264 for re-encoded output. Quality 95 (and 100 when re-encoding is unavoidable) is
+    about VMAF 98 against the source; each 5 points lower trades detail for a smaller file.
 
-    The ceiling only stops a very compact source, such as AV1, from ballooning;
-    it sits far above what a near-transparent H.264 copy needs.
+    The ceiling only stops a very compact source, such as AV1, from ballooning.
     """
+    quality = max(50, min(95, int(quality)))
+    crf = 16 + (95 - quality) * 0.4  # 95 -> 16, 90 -> 18, 80 -> 22, 70 -> 26, 50 -> 34
     source_rate = max(0, int(source_video_bitrate_kbps))
     ceiling = max(8_000, source_rate * 4) if source_rate else 0
     if encoder == "nvenc":
         arguments = [
             "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-profile:v", "high",
-            "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-rc", "vbr", "-cq", f"{round(crf) + 3}", "-b:v", "0", "-pix_fmt", "yuv420p",
         ]
     else:
         arguments = [
-            "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
+            "-c:v", "libx264", "-preset", "slow", "-crf", f"{round(crf)}", "-profile:v", "high",
             "-pix_fmt", "yuv420p",
         ]
     if ceiling:

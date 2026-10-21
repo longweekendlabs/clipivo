@@ -31,6 +31,8 @@ class MatchAssessment:
     faces_detected: int
     score: float
     matched: bool
+    # Best-matching face as (x1, y1, x2, y2) in frame pixels, when known.
+    box: tuple[float, float, float, float] | None = None
 
 
 class FaceEngine(Protocol):
@@ -164,8 +166,10 @@ class InsightFaceEngine:
             return {target_id: MatchAssessment(0, 0.0, False) for target_id in targets}
         results: dict[str, MatchAssessment] = {}
         for target_id, (reference_matrix, threshold) in targets.items():
-            score = max(float((reference_matrix @ face.normed_embedding).max()) for face in faces)
-            results[target_id] = MatchAssessment(len(faces), score, score >= threshold)
+            scores = [float((reference_matrix @ face.normed_embedding).max()) for face in faces]
+            best = max(range(len(faces)), key=scores.__getitem__)
+            box = tuple(float(value) for value in faces[best].bbox[:4])
+            results[target_id] = MatchAssessment(len(faces), scores[best], scores[best] >= threshold, box)
         return results
 
     def reference_matrix(self, references: list[tuple[str, bytes]]):

@@ -26,6 +26,14 @@ By default Clipivo copies the original video stream without re-encoding it, so e
 
 When you need cuts on the exact frame, choose Exact frames. It re-encodes at high quality with H.264, on an NVIDIA card with NVENC or on the CPU. Either way, everything Start saves is checked for the expected length and decoded through to its last frames before it is called done.
 
+## Smaller files when you want them
+
+A Quality slider runs from 50% to 100%. At 100% the original is copied untouched; lower values re-encode on the exact frames into smaller files for videos you only want to keep a glimpse of.
+
+Size keeps the original or limits output to 1440p, 1080p or 720p by the shorter side, so a 4K video in 16:9, 4:3 or portrait keeps its shape and nothing is ever enlarged.
+
+Frame can follow the person. Choose landscape, portrait or square and each clip is cropped steadily around where the person was found, so a split screen or a reporter beside the news footage becomes a picture of just them. Every clip is scaled to the same size, so a stitched video never changes shape.
+
 ## Batch: many videos, many people, unattended
 
 Drop videos or whole folders into Batch. Every video has its own Who column, and Clipivo looks only for the people listed there, so one queue can hold three videos for one person and five for another. Start will not run while a video has nobody chosen.

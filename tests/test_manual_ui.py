@@ -181,11 +181,17 @@ class ManualUiTests(unittest.TestCase):
         try:
             window._video_opened(probe_video(self.video))
             job = window.right_panel.job
-            self.assertEqual([job.mode.itemText(row) for row in range(job.mode.count())], ["Original quality", "Exact frames"])
-            self.assertEqual(job.mode.currentData(), "copy")
-            self.assertIn("identical", job.mode.itemData(0, Qt.ToolTipRole))
-            self.assertIn("exact frame", job.mode.itemData(1, Qt.ToolTipRole))
-            job.mode.setCurrentIndex(job.mode.findData("accurate"))
+            job.quality.setValue(20)
+            job.max_size.setCurrentIndex(0)
+            job.framing.setCurrentIndex(0)
+            self.assertEqual(job.quality_label.text(), "Original")
+            self.assertIn("identical", job.output_hint.text())
+            job.framing.setCurrentIndex(job.framing.findData("portrait"))
+            self.assertIn("95%", job.output_hint.text())
+            job.framing.setCurrentIndex(0)
+            job.quality.setValue(18)
+            self.assertEqual(job.values()["output_quality"], 90)
+            self.assertEqual(job.values()["mode"], "accurate")
             self.assertEqual(job.destination.itemText(0), "Same folder as video")
             self.assertEqual(job.destination.itemData(job.destination.count() - 1), "__choose_folder__")
             job.arrangement.setCurrentIndex(job.arrangement.findData("compilation"))
@@ -421,14 +427,13 @@ class ManualUiTests(unittest.TestCase):
             for dialog in window.findChildren(FilterConfigDialog):
                 dialog.done(QDialog.Accepted)
             self.assertEqual([item.kind for item in page.filters()], ["crop"])
-            self.assertEqual(window.right_panel.job.mode.currentData(), "accurate")
-            copy_row = window.right_panel.job.mode.findData("copy")
-            self.assertFalse(window.right_panel.job.mode.model().item(copy_row).isEnabled())
+            self.assertEqual(window.right_panel.job.values()["mode"], "accurate")
+            self.assertEqual(window.right_panel.job.quality.maximum(), 19)
 
             page._remove_filter()
             self.assertEqual(page.filters(), [])
-            self.assertTrue(window.right_panel.job.mode.model().item(copy_row).isEnabled())
-            self.assertEqual(window.right_panel.job.mode.currentData(), "copy")
+            self.assertEqual(window.right_panel.job.quality.maximum(), 20)
+            self.assertEqual(window.right_panel.job.values()["mode"], "copy")
 
             for category_row, available_row, expected in ((0, 1, "Rotate"), (1, 0, "Contrast")):
                 page.show_manager()

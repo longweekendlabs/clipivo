@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 from core.batch import SOURCE_AFTER
 from core.character_store import CharacterStore
 from core.face_engine import FaceEngine
+from core.framing import FRAMINGS, MAX_SIZES
 from core.naming import DEFAULT_SCHEME, NAMING_SCHEMES, output_base_name
 
 from .native_dialogs import choose_directory, choose_images
@@ -222,19 +224,34 @@ class JobPanel(QWidget):
         self.arrangement.addItem("Separate clips", "separate")
         self.arrangement.setToolTip("Join every appearance into one file, or save each one on its own")
         form.addRow("Save as", self.arrangement)
-        self.mode = QComboBox()
-        self.mode.addItem("Original quality", "copy")
-        self.mode.addItem("Exact frames", "accurate")
-        self.mode.setItemData(
-            0, "Copies the original video untouched, so quality is identical. "
-            "Each clip starts at the keyframe just before, often a second or few early.", Qt.ToolTipRole,
+        quality_row = QHBoxLayout()
+        quality_row.setSpacing(6)
+        self.quality = QSlider(Qt.Horizontal)
+        self.quality.setRange(10, 20)  # steps of 5: 50% to 100%
+        self.quality.setPageStep(1)
+        self.quality.setValue(20)
+        self.quality.setToolTip(
+            "100% copies the original untouched; clips start at the keyframe before. "
+            "Lower values re-encode on the exact frame into smaller files."
         )
-        self.mode.setItemData(
-            1, "Re-encodes at high quality so clips start and end on the exact frame. "
-            "Slower and the files are larger than the original.", Qt.ToolTipRole,
+        self.quality_label = QLabel("Original")
+        self.quality_label.setMinimumWidth(52)
+        quality_row.addWidget(self.quality, 1)
+        quality_row.addWidget(self.quality_label)
+        form.addRow("Quality", quality_row)
+        self.max_size = QComboBox()
+        for value, label in MAX_SIZES.items():
+            self.max_size.addItem(label, value)
+        self.max_size.setToolTip("Shrinks larger videos by their shorter side, so any shape stays the same. Never enlarges.")
+        form.addRow("Size", self.max_size)
+        self.framing = QComboBox()
+        for key, label in FRAMINGS.items():
+            self.framing.addItem(label, key)
+        self.framing.setToolTip(
+            "Follow person crops each clip around where the person is, such as their half of a split screen. "
+            "Every clip is scaled to the same size, so a stitched video never changes shape."
         )
-        self.mode.setToolTip(self.mode.itemData(0, Qt.ToolTipRole))
-        form.addRow("Quality", self.mode)
+        form.addRow("Frame", self.framing)
         self.destination = QComboBox()
         self.destination.setToolTip("Where finished videos are saved; names end with the date, time and person")
         self.destination.activated.connect(self._destination_activated)
@@ -259,13 +276,17 @@ class JobPanel(QWidget):
             )
             self.source_after.activated.connect(self._source_after_activated)
             form.addRow("Original", self.source_after)
-        for combo in (self.arrangement, self.mode, self.destination, self.naming, *([self.source_after] if self.source_after else [])):
+        for combo in (self.arrangement, self.max_size, self.framing, self.destination, self.naming, *([self.source_after] if self.source_after else [])):
             combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         layout.addLayout(form)
         self.name_preview = QLabel("")
         self.name_preview.setObjectName("targetHint")
         self.name_preview.setWordWrap(True)
         layout.addWidget(self.name_preview)
+        self.output_hint = QLabel("")
+        self.output_hint.setObjectName("targetHint")
+        self.output_hint.setWordWrap(True)
+        layout.addWidget(self.output_hint)
         self.include_audio = QCheckBox("Include audio")
         self.include_audio.setChecked(True)
         layout.addWidget(self.include_audio)
@@ -304,9 +325,11 @@ class JobPanel(QWidget):
         status_row.addWidget(self.open_folder_button, 0, Qt.AlignTop)
         layout.addLayout(status_row)
 
-        for combo in (self.arrangement, self.mode, self.naming):
+        for combo in (self.arrangement, self.naming, self.max_size, self.framing):
             combo.currentIndexChanged.connect(self._settings_changed)
-        self.mode.currentIndexChanged.connect(lambda *_args: self.mode.setToolTip(self.mode.currentData(Qt.ToolTipRole)))
+        for combo in (self.max_size, self.framing):
+            combo.currentIndexChanged.connect(lambda *_args: self._update_output_hint())
+        self.quality.valueChanged.connect(lambda *_args: (self._update_output_hint(), self._settings_changed()))
         self.naming.currentIndexChanged.connect(lambda *_args: self._update_naming())
         self.custom_name.textChanged.connect(lambda *_args: (self._update_naming(), self._settings_changed()))
         self.include_audio.toggled.connect(self._settings_changed)
@@ -498,7 +521,10 @@ class JobPanel(QWidget):
         destination = self.destination.currentData()
         return {
             "arrangement": str(self.arrangement.currentData()),
-            "mode": str(self.mode.currentData()),
+            "mode": "copy" if self.quality_percent() == 100 else "accurate",
+            "output_quality": self.quality_percent(),
+            "max_short_side": int(self.max_size.currentData()),
+            "framing": str(self.framing.currentData()),
             "save_next_to_source": destination == SAME_FOLDER,
             "output_dir": "" if destination == SAME_FOLDER else str(destination or ""),
             "include_audio": self.include_audio.isChecked(),
@@ -511,7 +537,11 @@ class JobPanel(QWidget):
     def set_values(self, values: dict) -> None:
         self._loading = True
         self.arrangement.setCurrentIndex(max(0, self.arrangement.findData(values.get("arrangement", "compilation"))))
-        self.mode.setCurrentIndex(max(0, self.mode.findData(values.get("mode", "accurate"))))
+        default_quality = 100 if values.get("mode", "copy") == "copy" else 95
+        self.quality.setValue(max(10, min(20, int(values.get("output_quality", default_quality)) // 5)))
+        self.max_size.setCurrentIndex(max(0, self.max_size.findData(int(values.get("max_short_side", 0) or 0))))
+        self.framing.setCurrentIndex(max(0, self.framing.findData(values.get("framing", "whole"))))
+        self._update_output_hint()
         self._custom_folder = str(values.get("output_dir", "") or "")
         self._rebuild_destinations(SAME_FOLDER if values.get("save_next_to_source", True) or not self._custom_folder else self._custom_folder)
         self.include_audio.setChecked(bool(values.get("include_audio", True)))
@@ -523,26 +553,39 @@ class JobPanel(QWidget):
         self._update_naming()
         self._loading = False
 
+    def quality_percent(self) -> int:
+        return int(self.quality.value()) * 5
+
     def set_copy_allowed(self, allowed: bool) -> None:
-        """Filters need re-encoding; switch to exact frames without changing the saved preference."""
-        model = self.mode.model()
-        copy_row = self.mode.findData("copy")
-        item = model.item(copy_row) if hasattr(model, "item") else None
-        if item is not None:
-            item.setEnabled(allowed)
+        """Filters need re-encoding: cap the slider at 95% without changing the saved preference."""
         was_loading = self._loading
         self._loading = True
-        if not allowed and self.mode.currentData() == "copy":
-            self._forced_exact = True
-            self.mode.setCurrentIndex(self.mode.findData("accurate"))
-        elif allowed and getattr(self, "_forced_exact", False):
-            self._forced_exact = False
-            self.mode.setCurrentIndex(copy_row)
+        if not allowed:
+            if self.quality.value() == 20:
+                self._forced_exact = True
+            self.quality.setMaximum(19)
+        else:
+            self.quality.setMaximum(20)
+            if getattr(self, "_forced_exact", False):
+                self._forced_exact = False
+                self.quality.setValue(20)
         self._loading = was_loading
-        self.mode.setToolTip(
-            self.mode.currentData(Qt.ToolTipRole) if allowed
-            else "Active video filters need re-encoding, so original quality is off"
-        )
+        self._copy_allowed = allowed
+        self._update_output_hint()
+
+    def _update_output_hint(self) -> None:
+        percent = self.quality_percent()
+        self.quality_label.setText("Original" if percent == 100 else f"{percent}%")
+        reshaping = int(self.max_size.currentData() or 0) or self.framing.currentData() != "whole"
+        if percent == 100 and not reshaping:
+            text = "Copied untouched: identical picture, clips start at the keyframe before."
+        elif percent == 100:
+            text = "Resizing or following a person re-encodes, at 95% (visually the same)."
+        else:
+            text = f"Re-encoded at {percent}% on the exact frames: smaller files, softer picture as it goes down."
+        if not getattr(self, "_copy_allowed", True):
+            text = "Video filters are on, so output is re-encoded."
+        self.output_hint.setText(text)
 
     def _rebuild_destinations(self, select) -> None:
         self.destination.blockSignals(True)
@@ -580,8 +623,9 @@ class JobPanel(QWidget):
         prefix = f"{self.settings_key}/"
         self.set_values({
             "arrangement": settings.value(prefix + "arrangement", "compilation"),
-            # A new key: 0.3.0 saved "mode" with a re-encoding default.
-            "mode": settings.value(prefix + "quality", "copy"),
+            "output_quality": settings.value(prefix + "output_quality", 100, int),
+            "max_short_side": settings.value(prefix + "max_short_side", 0, int),
+            "framing": settings.value(prefix + "framing", "whole"),
             "save_next_to_source": settings.value(prefix + "save_next_to_source", True, bool),
             "output_dir": settings.value(prefix + "output_dir", ""),
             "include_audio": settings.value(prefix + "include_audio", True, bool),
@@ -595,7 +639,8 @@ class JobPanel(QWidget):
         values = self.values()
         for key in ("arrangement", "save_next_to_source", "include_audio", "naming", "custom_name"):
             settings.setValue(prefix + key, values[key])
-        settings.setValue(prefix + "quality", values["mode"])
+        for key in ("output_quality", "max_short_side", "framing"):
+            settings.setValue(prefix + key, values[key])
         settings.setValue(prefix + "output_dir", self._custom_folder)
 
     def apply_default_folder(self, folder: str) -> None:
@@ -655,7 +700,7 @@ class JobPanel(QWidget):
         if self.pause_button:
             self.pause_button.setVisible(running)
             self.pause_button.setText("Resume" if paused else "Pause")
-        for widget in (self.arrangement, self.mode, self.destination, self.include_audio, self.add_photos_button,
+        for widget in (self.arrangement, self.quality, self.max_size, self.framing, self.destination, self.include_audio, self.add_photos_button,
                        self.naming, self.custom_name, *([self.source_after] if self.source_after else [])):
             widget.setEnabled(not running)
         if self.people_list is not None:

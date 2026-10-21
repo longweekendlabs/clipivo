@@ -35,6 +35,9 @@ class ClipRange:
     origin: str = "manual"
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid4().hex)
+    # Where the person sits in this clip: [x_min, x_max, y, face_height, frame_w, frame_h]
+    # from face centres, used by person framing. None for clips marked by hand.
+    subject: list[float] | None = None
 
     @property
     def duration_ms(self) -> int:
@@ -51,4 +54,5 @@ class ClipRange:
             end_ms=int(data["end_ms"]),
             origin=str(data.get("origin", "manual")),
             enabled=bool(data.get("enabled", True)),
+            subject=[float(value) for value in data["subject"]] if data.get("subject") else None,
         )

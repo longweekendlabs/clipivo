@@ -52,7 +52,7 @@ from core.video_probe import ProbeError, probe_video
 from .about_dialog import AboutDialog
 from .batch_page import BatchExecutionWorker, BatchPage
 from core.batch import VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
-from core.export import snap_to_keyframes
+from core.export import OutputShape, snap_to_keyframes
 from core.naming import output_base_name
 from .icons import line_icon
 from .job_panel import OneTimePerson
@@ -118,9 +118,11 @@ class ExportWorker(QThread):
         video_encoder: str,
         parent=None,
         output_name: str | None = None,
+        shape: OutputShape | None = None,
     ):
         super().__init__(parent)
         self.output_name = output_name
+        self.shape = shape
         self.source = source
         self.clips = [ClipRange.from_dict(item.to_dict()) for item in clips]
         self.output_dir = output_dir
@@ -139,7 +141,9 @@ class ExportWorker(QThread):
     def run(self) -> None:
         try:
             clips = self.clips
-            if self.mode == "copy" and not any(item.enabled for item in self.filters):
+            if self.mode == "copy" and not any(item.enabled for item in self.filters) and not (
+                self.shape and self.shape.needs_reencode()
+            ):
                 # A stream copy starts on a keyframe; snap first so clips never repeat footage.
                 self.progressed.emit(0, 1, "Finding keyframes for original-quality cuts")
                 clips = snap_to_keyframes(self.source, clips)
@@ -157,6 +161,7 @@ class ExportWorker(QThread):
                 source_fps=self.source_fps,
                 video_encoder=self.video_encoder,
                 output_name=self.output_name,
+                shape=self.shape,
             )
             self.succeeded.emit(outputs)
         except ExportError as exc:
@@ -1486,6 +1491,9 @@ class MainWindow(QMainWindow):
             custom_name=values["custom_name"],
             source_after=values["source_after"],
             source_folder=values["source_folder"],
+            output_quality=values["output_quality"],
+            max_short_side=values["max_short_side"],
+            framing=values["framing"],
         )
         if configuration.source_after == "trash" and QMessageBox.question(
             self,
@@ -1688,6 +1696,12 @@ class MainWindow(QMainWindow):
             self.export_video_encoder,
             self,
             output_name=output_base_name(self.video_info.path, values["naming"], values["custom_name"]),
+            shape=OutputShape(
+                values["output_quality"] if values["mode"] == "copy" else min(95, values["output_quality"]),
+                values["max_short_side"],
+                values["framing"],
+                (self.video_info.width, self.video_info.height),
+            ),
         )
         self.video_job.set_running(True)
         self.video_job.show_progress(0, "Saving clips…")

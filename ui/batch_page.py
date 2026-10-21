@@ -34,7 +34,7 @@ from core.batch import (
     validate_export,
 )
 from core.character_store import CharacterStore
-from core.export import ExportError, export_ranges, snap_to_keyframes
+from core.export import ExportError, OutputShape, export_ranges, snap_to_keyframes
 from core.naming import output_base_name
 from core.face_engine import FaceEngine
 from core.filters import VideoFilter
@@ -141,7 +141,14 @@ class BatchExecutionWorker(QThread):
             return
 
         stitched = self.configuration.arrangement == "compilation"
-        mode = "accurate" if any(item.enabled for item in self.filters) else self.configuration.mode
+        shape = OutputShape(
+            self.configuration.output_quality if self.configuration.mode == "copy" else min(95, self.configuration.output_quality),
+            self.configuration.max_short_side,
+            self.configuration.framing,
+            (int(getattr(info, "width", 0) or 0), int(getattr(info, "height", 0) or 0)),
+        )
+        filtered = any(item.enabled for item in self.filters)
+        mode = "accurate" if filtered or shape.needs_reencode() else self.configuration.mode
         output_dir = self.configuration.output_dir_for(source)
         found_ms = 0
         wanted_names: dict[Path, str] = {}
@@ -182,6 +189,7 @@ class BatchExecutionWorker(QThread):
                 output_character=result.character_name,
                 source_video_bitrate_kbps=getattr(info, "video_bitrate_kbps", 0),
                 output_name=base_name,
+                shape=shape,
             )
             expected = [sum(item.duration_ms for item in ranges)] if stitched else [item.duration_ms for item in ranges]
             for position, (output, expected_duration) in enumerate(zip(character_outputs, expected, strict=True), start=1):
@@ -746,6 +754,9 @@ class BatchPage(QWidget):
         self.configuration.custom_name = values["custom_name"]
         self.configuration.source_after = values["source_after"]
         self.configuration.source_folder = values["source_folder"]
+        self.configuration.output_quality = values["output_quality"]
+        self.configuration.max_short_side = values["max_short_side"]
+        self.configuration.framing = values["framing"]
 
     def _configuration_changed(self, *_args) -> None:
         if self._building:
