@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QSize, QThread, Qt, Signal
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
@@ -35,7 +36,7 @@ from core.batch import (
     validate_export,
 )
 from core.character_store import CharacterStore
-from core.export import ExportError, OutputShape, export_ranges, snap_to_keyframes
+from core.export import ExportError, OutputShape, export_ranges, extract_cover, snap_to_keyframes
 from core.naming import output_base_name
 from core.face_engine import FaceEngine
 from core.filters import VideoFilter
@@ -248,6 +249,26 @@ def _take_wanted_name(path: Path, wanted: str) -> Path:
     return target
 
 
+class _CoverWorker(QThread):
+    """Pulls embedded cover pictures (YouTube thumbnails) for queue rows, one file at a time."""
+
+    found = Signal(str, str)
+
+    def __init__(self, paths: list[str], parent=None):
+        super().__init__(parent)
+        self.paths = paths
+
+    def run(self) -> None:
+        for path in self.paths:
+            if self.isInterruptionRequested():
+                return
+            try:
+                cover = extract_cover(Path(path), max_width=160)
+            except OSError:
+                cover = None
+            self.found.emit(path, str(cover) if cover else "")
+
+
 class _QueueTable(QTableWidget):
     """The video list; accepts videos and folders dropped from a file manager."""
 
@@ -303,6 +324,8 @@ class BatchPage(QWidget):
         self.busy_elsewhere = lambda: False
         self._paused = False
         self._foreground_busy = False
+        self._covers: dict[str, QIcon | None] = {}
+        self._cover_workers: set[_CoverWorker] = set()
         self._building = True
         self._build_ui()
         self.job.set_values(self.configuration.to_dict())
@@ -373,6 +396,7 @@ class BatchPage(QWidget):
         self.queue.setObjectName("batchQueue")
         self.queue.setHorizontalHeaderLabels(("Run", "Video", "Who", "Status", "Progress"))
         self.queue.verticalHeader().hide()
+        self.queue.setIconSize(QSize(64, 36))
         self.queue.setSelectionBehavior(QTableWidget.SelectRows)
         self.queue.setSelectionMode(QTableWidget.ExtendedSelection)
         self.queue.setAlternatingRowColors(True)
@@ -740,6 +764,9 @@ class BatchPage(QWidget):
             video_item = QTableWidgetItem(entry.path.name)
             video_item.setData(Qt.UserRole, entry.id)
             video_item.setToolTip(str(entry.path))
+            icon = self._covers.get(entry.source)
+            if icon is not None:
+                video_item.setIcon(icon)
             self.queue.setItem(row, 1, video_item)
             self.queue.setCellWidget(row, 2, self._who_button(entry))
             detail = "Waiting" if entry.detail == "Ready" else entry.detail
@@ -751,17 +778,50 @@ class BatchPage(QWidget):
             progress.setValue(entry.progress)
             progress.setFormat(f"{entry.progress}%")
             self.queue.setCellWidget(row, 4, progress)
-            self.queue.setRowHeight(row, 34)
+            self.queue.setRowHeight(row, 40)
         self._building = was_building
+        self._request_covers()
         self.empty_hint.setVisible(not self.configuration.videos)
         self._update_summary()
         self._update_actions()
+
+    def _request_covers(self) -> None:
+        missing = [entry.source for entry in self.configuration.videos if entry.source not in self._covers]
+        if not missing:
+            return
+        for path in missing:
+            self._covers[path] = None  # requested; filled in when found
+        worker = _CoverWorker(missing, self)
+        self._cover_workers.add(worker)
+        worker.found.connect(self._cover_found)
+        worker.finished.connect(lambda: (self._cover_workers.discard(worker), worker.deleteLater()))
+        worker.start()
+
+    def _cover_found(self, path: str, cover: str) -> None:
+        if not cover:
+            return
+        icon = QIcon(QPixmap(cover))
+        self._covers[path] = icon
+        for row, entry in enumerate(self.configuration.videos):
+            item = self.queue.item(row, 1)
+            if entry.source == path and item is not None:
+                item.setIcon(icon)
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)
+
+    def shutdown(self) -> None:
+        for worker in list(self._cover_workers):
+            worker.requestInterruption()
+            worker.wait(5000)
 
     def _sync_configuration(self) -> None:
         values = self.job.values()
         self.configuration.character_ids = self.job.selected_ids()
         self.configuration.output_dir = values["output_dir"]
         self.configuration.save_next_to_source = values["save_next_to_source"]
+        self.configuration.save_into_done = values["save_into_done"]
         self.configuration.arrangement = values["arrangement"]
         self.configuration.mode = values["mode"]
         self.configuration.include_audio = values["include_audio"]

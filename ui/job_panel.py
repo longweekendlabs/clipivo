@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.batch import SOURCE_AFTER
+from core.batch import OUTPUT_SUBFOLDER, SOURCE_AFTER
 from core.character_store import CharacterStore
 from core.face_engine import FaceEngine
 from core.framing import FRAMINGS, MAX_SIZES
@@ -36,6 +36,7 @@ from .native_dialogs import choose_directory, choose_images
 
 
 SAME_FOLDER = "__same_folder__"
+DONE_FOLDER = "__done_folder__"
 CHOOSE_FOLDER = "__choose_folder__"
 
 
@@ -525,8 +526,9 @@ class JobPanel(QWidget):
             "output_quality": self.quality_percent(),
             "max_short_side": int(self.max_size.currentData()),
             "framing": str(self.framing.currentData()),
-            "save_next_to_source": destination == SAME_FOLDER,
-            "output_dir": "" if destination == SAME_FOLDER else str(destination or ""),
+            "save_next_to_source": destination in (SAME_FOLDER, DONE_FOLDER),
+            "save_into_done": destination == DONE_FOLDER,
+            "output_dir": "" if destination in (SAME_FOLDER, DONE_FOLDER) else str(destination or ""),
             "include_audio": self.include_audio.isChecked(),
             "naming": str(self.naming.currentData()),
             "custom_name": self.custom_name.text().strip(),
@@ -543,7 +545,13 @@ class JobPanel(QWidget):
         self.framing.setCurrentIndex(max(0, self.framing.findData(values.get("framing", "whole"))))
         self._update_output_hint()
         self._custom_folder = str(values.get("output_dir", "") or "")
-        self._rebuild_destinations(SAME_FOLDER if values.get("save_next_to_source", True) or not self._custom_folder else self._custom_folder)
+        if values.get("save_into_done"):
+            selected = DONE_FOLDER
+        elif values.get("save_next_to_source", True) or not self._custom_folder:
+            selected = SAME_FOLDER
+        else:
+            selected = self._custom_folder
+        self._rebuild_destinations(selected)
         self.include_audio.setChecked(bool(values.get("include_audio", True)))
         self.naming.setCurrentIndex(max(0, self.naming.findData(values.get("naming", DEFAULT_SCHEME))))
         self.custom_name.setText(str(values.get("custom_name", "") or ""))
@@ -591,9 +599,11 @@ class JobPanel(QWidget):
         self.destination.blockSignals(True)
         self.destination.clear()
         self.destination.addItem("Same folder as video", SAME_FOLDER)
+        self.destination.addItem(f"“{OUTPUT_SUBFOLDER}” folder beside video", DONE_FOLDER)
+        self.destination.setItemData(1, f"Results go into a “{OUTPUT_SUBFOLDER}” folder next to each video", Qt.ToolTipRole)
         if self._custom_folder:
             self.destination.addItem(self._short_path(self._custom_folder), self._custom_folder)
-            self.destination.setItemData(1, self._custom_folder, Qt.ToolTipRole)
+            self.destination.setItemData(self.destination.count() - 1, self._custom_folder, Qt.ToolTipRole)
         self.destination.addItem("Choose folder…", CHOOSE_FOLDER)
         index = self.destination.findData(select)
         self.destination.setCurrentIndex(max(0, index))
@@ -629,6 +639,7 @@ class JobPanel(QWidget):
             "save_next_to_source": settings.value(prefix + "save_next_to_source", True, bool),
             "output_dir": settings.value(prefix + "output_dir", ""),
             "include_audio": settings.value(prefix + "include_audio", True, bool),
+            "save_into_done": settings.value(prefix + "save_into_done", False, bool),
             "naming": settings.value(prefix + "naming", DEFAULT_SCHEME),
             "custom_name": settings.value(prefix + "custom_name", ""),
         })
@@ -637,7 +648,7 @@ class JobPanel(QWidget):
         settings = QSettings()
         prefix = f"{self.settings_key}/"
         values = self.values()
-        for key in ("arrangement", "save_next_to_source", "include_audio", "naming", "custom_name"):
+        for key in ("arrangement", "save_next_to_source", "save_into_done", "include_audio", "naming", "custom_name"):
             settings.setValue(prefix + key, values[key])
         for key in ("output_quality", "max_short_side", "framing"):
             settings.setValue(prefix + key, values[key])

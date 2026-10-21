@@ -40,9 +40,11 @@ Frame can follow the person. Choose landscape, portrait or square and Clipivo tr
 
 Drop videos or whole folders into Batch. Every video has its own Who column, and Clipivo looks only for the people listed there, so one queue can hold three videos for one person and five for another. Start will not run while a video has nobody chosen.
 
-Choose what happens to each original once its results are saved and checked: leave it, move it into a "Clipivo done" folder beside it, move it to a folder you choose, or move it to the Trash. Nothing is moved for a video that failed, was cancelled, or where someone was not found. The queue pauses, cancels safely and survives a restart.
+Save results next to each video, into a "Clipivo done" folder beside it, or into a folder you choose. Then choose what happens to each original once its results are saved and checked: leave it, move it into a "Clipivo source" folder beside it, move it to a folder you choose, or move it to the Trash. Adding the same folder again later skips both, so nothing is processed twice. Nothing is moved for a video that failed, was cancelled, or where someone was not found. The queue pauses, cancels safely and survives a restart.
 
 ## Names you choose
+
+When a video carries a cover picture, as YouTube downloads do, every result keeps the same thumbnail and the Batch list shows it.
 
 Name results after the video with the date, exactly like the video, or with your own text plus the video's ID, with or without the date. The ID is read from downloader names such as `Title-gvj96ngMgwY` or `Title [id]`, and a live example shows the name before you start. Separate clips are numbered.
 

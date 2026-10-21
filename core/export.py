@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -38,6 +39,69 @@ def _with_framed_size(shape: OutputShape, clips: list[ClipRange]) -> OutputShape
     if shape.max_short_side:
         short = min(short, shape.max_short_side)
     return replace(shape, out_short=max(2, int(short) // 2 * 2))
+
+
+def cover_stream_index(source: Path) -> int | None:
+    """Index of an embedded cover picture (a YouTube download's thumbnail), if the file has one."""
+    try:
+        completed = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+             "stream=index:stream_disposition=attached_pic", "-of", "csv=p=0", str(source)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in completed.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) >= 2 and parts[1] == "1":
+            return int(parts[0])
+    return None
+
+
+def extract_cover(source: Path, max_width: int = 0) -> Path | None:
+    """Save the embedded cover to Clipivo's cache and return its path, or None."""
+    index = cover_stream_index(source)
+    if index is None:
+        return None
+    stat = Path(source).stat()
+    key = hashlib.sha1(f"{Path(source).resolve()}|{stat.st_size}|{int(stat.st_mtime)}|{max_width}".encode()).hexdigest()[:20]
+    target = export_work_dir() / "covers" / f"{key}.png"
+    if target.is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    command = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source), "-map", f"0:{index}", "-frames:v", "1"]
+    if max_width:
+        command += ["-vf", f"scale='min({max_width},iw)':-2"]
+    try:
+        completed = subprocess.run([*command, str(target)], capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return target if completed.returncode == 0 and target.is_file() else None
+
+
+def embed_cover(output: Path, cover: Path, logs: list[str] | None = None) -> bool:
+    """Attach the source's cover to a finished file, so it shows the same thumbnail.
+    Never fatal: the output is kept as it is if this fails."""
+    temporary = output.with_name(f".{output.stem}.cover{output.suffix}")
+    command = [
+        "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(output), "-i", str(cover),
+        "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic",
+        "-movflags", "+faststart", str(temporary),
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=600, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        temporary.unlink(missing_ok=True)
+        if logs is not None:
+            logs.append(f"Cover not attached: {exc}")
+        return False
+    if completed.returncode != 0 or not temporary.is_file():
+        temporary.unlink(missing_ok=True)
+        if logs is not None:
+            logs.append("Cover not attached: " + (completed.stderr.strip() or "ffmpeg failed"))
+        return False
+    temporary.replace(output)
+    return True
 
 
 def export_work_dir() -> Path:
@@ -201,6 +265,10 @@ def export_ranges(
                     )
                 result.append(clip_target)
             progress(total_units, total_units, "Export complete")
+        cover = extract_cover(source)
+        if cover:
+            for output in result:
+                embed_cover(output, cover, logs)
         return result
     except Exception as exc:
         log_path.write_text("\n\n".join(logs) or str(exc), encoding="utf-8")

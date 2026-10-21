@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-21
+
+### Added
+- Videos that carry a cover picture, such as YouTube downloads, pass it on: every clip and stitched video Clipivo saves gets the same thumbnail, and the Batch list shows it beside each video.
+- Save to has a new choice, a "Clipivo done" folder beside each video, so results collect in one place per folder.
+
+### Changed
+- Finished originals now move into a "Clipivo source" folder instead of "Clipivo done", so originals and results never share a folder.
+- Add folder and dropped folders skip "Clipivo source" and "Clipivo done", so Clipivo never queues its own results or originals it already finished.
+
 ## [0.6.0] - 2026-10-21
 
 ### Fixed

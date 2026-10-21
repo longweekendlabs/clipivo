@@ -93,13 +93,19 @@ class BatchCoreTests(unittest.TestCase):
     def test_finished_source_moves_into_done_folder_without_overwriting(self) -> None:
         folder = self.root / "move-test"
         folder.mkdir(exist_ok=True)
-        for name in ("news.mp4", "Clipivo done/news.mp4"):
+        for name in ("news.mp4", "Clipivo source/news.mp4"):
             (folder / name).parent.mkdir(exist_ok=True)
             (folder / name).write_bytes(b"x")
         status = handle_finished_source(folder / "news.mp4", "subfolder")
-        self.assertIn("Clipivo done", status)
+        self.assertIn("Clipivo source", status)
         self.assertFalse((folder / "news.mp4").exists())
-        self.assertTrue((folder / "Clipivo done" / "news (2).mp4").is_file())
+        self.assertTrue((folder / "Clipivo source" / "news (2).mp4").is_file())
+        (folder / "Clipivo done").mkdir(exist_ok=True)
+        (folder / "Clipivo done" / "clip.mp4").write_bytes(b"x")
+        (folder / "fresh.mkv").write_bytes(b"x")
+        self.assertEqual([path.name for path in discover_videos(folder)], ["fresh.mkv"])
+        configuration = BatchConfiguration(save_into_done=True)
+        self.assertEqual(configuration.output_dir_for(folder / "fresh.mkv"), folder / "Clipivo done")
         self.assertEqual(handle_finished_source(folder / "missing.mp4", "keep"), "")
 
     def test_folder_discovery_and_character_filename_safety(self) -> None:

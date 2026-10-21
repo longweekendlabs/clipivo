@@ -51,7 +51,7 @@ from core.video_probe import ProbeError, probe_video
 
 from .about_dialog import AboutDialog
 from .batch_page import BatchExecutionWorker, BatchPage
-from core.batch import VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
+from core.batch import OUTPUT_SUBFOLDER, VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
 from core.export import OutputShape, snap_to_keyframes
 from core.naming import output_base_name
 from .icons import line_icon
@@ -1486,6 +1486,7 @@ class MainWindow(QMainWindow):
             include_audio=values["include_audio"],
             video_encoder=self.export_video_encoder,
             save_next_to_source=values["save_next_to_source"],
+            save_into_done=values["save_into_done"],
             mode=values["mode"],
             naming=values["naming"],
             custom_name=values["custom_name"],
@@ -1682,7 +1683,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No clips", message)
             return
         values = self.video_job.values()
-        if values["save_next_to_source"]:
+        if values["save_into_done"]:
+            output_dir = self.video_info.path.parent / OUTPUT_SUBFOLDER
+        elif values["save_next_to_source"]:
             output_dir = self.video_info.path.parent
         elif values["output_dir"]:
             output_dir = Path(values["output_dir"])
@@ -1835,6 +1838,8 @@ class MainWindow(QMainWindow):
             self.filters_page.close_preview_process()
         if hasattr(self, "people_page"):
             self.people_page.shutdown()
+        if hasattr(self, "batch_page"):
+            self.batch_page.shutdown()
         if hasattr(self, "batch_page") and self.batch_page.worker and self.batch_page.worker.isRunning():
             self.batch_page.worker.cancel()
             self.batch_page.worker.wait(5000)

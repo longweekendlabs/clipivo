@@ -33,11 +33,13 @@ QUEUE_STATES = {
 
 SOURCE_AFTER = {
     "keep": "Leave it where it is",
-    "subfolder": "Move into a “Clipivo done” folder beside it",
+    "subfolder": "Move into a “Clipivo source” folder beside it",
     "folder": "Move to a folder I choose",
     "trash": "Move to Trash",
 }
-DONE_SUBFOLDER = "Clipivo done"
+SOURCE_SUBFOLDER = "Clipivo source"  # originals moved here after success
+OUTPUT_SUBFOLDER = "Clipivo done"  # optional home for outputs beside the video
+_CLIPIVO_FOLDERS = {SOURCE_SUBFOLDER.casefold(), OUTPUT_SUBFOLDER.casefold()}
 
 
 @dataclass
@@ -88,6 +90,8 @@ class BatchConfiguration:
     include_audio: bool = True
     video_encoder: str = "auto"
     save_next_to_source: bool = True
+    # Outputs go into a "Clipivo done" folder beside each video instead of next to it.
+    save_into_done: bool = False
     mode: str = "copy"
     source_after: str = "keep"
     source_folder: str = ""
@@ -99,6 +103,8 @@ class BatchConfiguration:
     framing: str = "whole"
 
     def output_dir_for(self, source: Path) -> Path:
+        if self.save_into_done:
+            return Path(source).parent / OUTPUT_SUBFOLDER
         if self.save_next_to_source or not self.output_dir:
             return Path(source).parent
         return Path(self.output_dir)
@@ -126,6 +132,7 @@ class BatchConfiguration:
             include_audio=bool(payload.get("include_audio", True)),
             video_encoder=encoder if encoder in {"auto", "nvenc", "cpu"} else "auto",
             save_next_to_source=bool(payload.get("save_next_to_source", not payload.get("output_dir"))),
+            save_into_done=bool(payload.get("save_into_done", False)),
             # Version 1 re-encoded by default; original quality is the default from version 2.
             mode="accurate" if payload.get("mode") == "accurate" and int(payload.get("version", 1)) >= 2 else "copy",
             source_after=source_after,
@@ -190,7 +197,12 @@ def discover_videos(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(
-        (path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES),
+        (
+            path for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+            # Never queue Clipivo's own outputs or the originals it already finished.
+            and not any(part.casefold() in _CLIPIVO_FOLDERS for part in path.relative_to(root).parts[:-1])
+        ),
         key=lambda path: str(path).casefold(),
     )
 
@@ -656,8 +668,8 @@ def move_source_to_folder(source: Path, folder: Path) -> Path:
 def handle_finished_source(source: Path, choice: str, chosen_folder: str = "") -> str:
     """Apply the user's choice to a source whose outputs all validated. Returns a short status."""
     if choice == "subfolder":
-        move_source_to_folder(source, Path(source).parent / DONE_SUBFOLDER)
-        return f"source moved to “{DONE_SUBFOLDER}”"
+        move_source_to_folder(source, Path(source).parent / SOURCE_SUBFOLDER)
+        return f"source moved to “{SOURCE_SUBFOLDER}”"
     if choice == "folder":
         if not chosen_folder:
             raise RuntimeError("Choose a folder for finished sources.")
