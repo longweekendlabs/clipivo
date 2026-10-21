@@ -24,6 +24,7 @@ from .styles import PALETTE
 class SettingsPage(QWidget):
     faceSettingsChanged = Signal(bool, int, float)
     exportSettingsChanged = Signal(str)
+    defaultFolderChanged = Signal(str)
     aboutRequested = Signal()
 
     def __init__(self, face_engine: FaceEngine | None, parent=None):
@@ -108,6 +109,26 @@ class SettingsPage(QWidget):
         export_form.addRow("", export_hint)
         root.addWidget(export)
 
+        saving = QGroupBox("Saving")
+        saving_form = QFormLayout(saving)
+        folder_row = QHBoxLayout()
+        self.default_folder_label = QLabel()
+        self.default_folder_label.setObjectName("settingsValue")
+        choose_folder = QPushButton("Choose…")
+        choose_folder.clicked.connect(self._choose_default_folder)
+        same_folder = QPushButton("Same folder as video")
+        same_folder.clicked.connect(lambda: self._set_default_folder(""))
+        folder_row.addWidget(self.default_folder_label, 1)
+        folder_row.addWidget(choose_folder)
+        folder_row.addWidget(same_folder)
+        saving_form.addRow("Default save location", folder_row)
+        saving_hint = QLabel("Video and Batch start here each time Clipivo opens. You can still pick another folder for one run.")
+        saving_hint.setWordWrap(True)
+        saving_hint.setStyleSheet(f"color: {PALETTE['muted']};")
+        saving_form.addRow("", saving_hint)
+        root.addWidget(saving)
+        self._show_default_folder()
+
         shortcuts = QGroupBox("Keyboard shortcuts")
         shortcuts.setToolTip("Application-wide commands available from the keyboard")
         shortcuts_grid = QGridLayout(shortcuts)
@@ -163,6 +184,25 @@ class SettingsPage(QWidget):
         self.threshold.valueChanged.connect(self._threshold_changed)
         self.export_encoder.currentIndexChanged.connect(self._export_changed)
         self.refresh_engine_status()
+
+    def default_folder(self) -> str:
+        return str(self.settings.value("output/default_folder", "", str) or "")
+
+    def _show_default_folder(self) -> None:
+        folder = self.default_folder()
+        self.default_folder_label.setText(folder or "Same folder as video")
+
+    def _choose_default_folder(self) -> None:
+        from .native_dialogs import choose_directory
+
+        folder = choose_directory(self, "Default save location", key="default_output_folder")
+        if folder:
+            self._set_default_folder(folder)
+
+    def _set_default_folder(self, folder: str) -> None:
+        self.settings.setValue("output/default_folder", folder)
+        self._show_default_folder()
+        self.defaultFolderChanged.emit(folder)
 
     def values(self) -> tuple[bool, int, float]:
         return self.gpu.isChecked(), int(self.detector.currentData()), self.threshold.value() / 100.0

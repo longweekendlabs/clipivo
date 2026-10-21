@@ -528,6 +528,8 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self.face_engine)
         self.settings_page.faceSettingsChanged.connect(self._face_settings_changed)
         self.settings_page.exportSettingsChanged.connect(self._export_settings_changed)
+        self.settings_page.defaultFolderChanged.connect(self._default_folder_changed)
+        self._default_folder_changed(self.settings_page.default_folder())
         self.settings_page.aboutRequested.connect(self._show_about)
         use_gpu, detector_size, threshold = self.settings_page.values()
         self._face_settings_changed(use_gpu, detector_size, threshold)
@@ -661,6 +663,7 @@ class MainWindow(QMainWindow):
             settings_key="video_job",
             start_text="Start",
             frame_provider=lambda: self.preview.source.copy(),
+            show_source_after=True,
         )
         self.video_job.start_button.setToolTip("Find the person in the whole video and save the result")
         self.video_job.startRequested.connect(self._start_video_job)
@@ -1481,7 +1484,16 @@ class MainWindow(QMainWindow):
             mode=values["mode"],
             naming=values["naming"],
             custom_name=values["custom_name"],
+            source_after=values["source_after"],
+            source_folder=values["source_folder"],
         )
+        if configuration.source_after == "trash" and QMessageBox.question(
+            self,
+            "Move the original to Trash?",
+            "Once the result is saved and checked, Clipivo moves this video to the Trash. "
+            "You can restore it from there.\n\nContinue?",
+        ) != QMessageBox.Yes:
+            return
         target = BatchCharacterTarget(person.id, person.name, references, self.people_page.match_threshold)
         self.player.stop()
         self._manual_frame = True
@@ -1563,6 +1575,12 @@ class MainWindow(QMainWindow):
         if self.job_worker is worker:
             self.job_worker = None
         worker.deleteLater()
+        if self.video_info and not self.video_info.path.exists():
+            # The original was moved away by the Original setting; the editor lets go of it.
+            status = self.video_job.status.text()
+            folder = self.video_job._last_output_folder
+            self._close_video()
+            self.video_job.show_finished(status, folder)
 
     def _find_worker_finished(self, worker: FindCharacterWorker) -> None:
         if self.find_worker is worker:
@@ -1599,6 +1617,11 @@ class MainWindow(QMainWindow):
             if hasattr(self.face_engine, "_application"):
                 self.face_engine._application = None
         self.people_page._update_engine_status()
+
+    def _default_folder_changed(self, folder: str) -> None:
+        self.video_job.apply_default_folder(folder)
+        self.batch_page.job.apply_default_folder(folder)
+        self.batch_page._persist()
 
     def _export_settings_changed(self, video_encoder: str) -> None:
         self.export_video_encoder = video_encoder if video_encoder in {"auto", "nvenc", "cpu"} else "auto"

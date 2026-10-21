@@ -598,6 +598,14 @@ class JobPanel(QWidget):
         settings.setValue(prefix + "quality", values["mode"])
         settings.setValue(prefix + "output_dir", self._custom_folder)
 
+    def apply_default_folder(self, folder: str) -> None:
+        """Start at the Settings default; a previously chosen folder stays in the list."""
+        if folder:
+            self._custom_folder = folder
+        self._rebuild_destinations(folder or SAME_FOLDER)
+        if not self._loading:
+            self._save_settings()
+
     def set_preview_source(self, source: Path | None) -> None:
         if source:
             self._preview_source = Path(source)
