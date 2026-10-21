@@ -30,6 +30,7 @@ from core.batch import (
     discover_videos,
     load_batch_configuration,
     handle_finished_source,
+    track_person_in_clips,
     save_batch_configuration,
     validate_export,
 )
@@ -127,6 +128,20 @@ class BatchExecutionWorker(QThread):
         )
         if self._cancelled():
             raise ExportError("Cancelled.")
+        if self.configuration.framing != "whole":
+            for result in results:
+                if not result.ranges:
+                    continue
+                target = next(item for item in targets if item.id == result.character_id)
+                track_person_in_clips(
+                    source, self.face_engine, target.id, self.face_engine.reference_matrix(target.references),
+                    target.threshold, list(result.ranges), cancelled=self._cancelled, wait_if_paused=self._wait_if_paused,
+                    progress=lambda done, total, name=result.character_name: self.entryUpdated.emit(
+                        entry.id, "analysing", 70, f"Following {name} through each shot · {round(done / max(1, total) * 100)}%", [],
+                    ),
+                )
+            if self._cancelled():
+                raise ExportError("Cancelled.")
         for result in results:
             self.rangesFound.emit(
                 entry.id, result.character_id, result.character_name,

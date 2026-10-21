@@ -712,7 +712,6 @@ class JobPanel(QWidget):
         if self.grab_frame_button:
             self.grab_frame_button.setEnabled(not running)
         if running:
-            self.progress.show()
             self.open_folder_button.hide()
 
     def show_progress(self, percent: int, text: str) -> None:

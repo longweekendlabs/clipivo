@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
+### Fixed
+- Follow person now follows the person. 0.5.0 chose one crop for a whole clip, so a clip that cut from a split screen to a full-screen shot was cropped between the two, often onto someone else or onto nothing. Each clip is now tracked: the face is checked every 0.4 seconds, camera cuts are found frame by frame, and every shot gets its own crop that pans smoothly when the person moves.
+- News tickers, headline boxes and social bars at the bottom are kept out of framed output. Clipivo finds the band of the picture that stays still through a shot and keeps the crop above it, with room for the scrolling crawl on top, as long as head and shoulders still fit.
+- Framed output is no longer blown up: it takes the size of the typical crop, capped by Size, so a 1080p source gives a sharp 468x832 portrait rather than a soft 1080x1920 one.
+- Clipivo shows its own icon and name in the title bar, task bar and window switcher instead of a generic icon and "python".
+- Temporary export segments are kept in Clipivo's cache folder instead of a hidden folder next to your videos, and leftovers from an interrupted export are removed the next time Clipivo starts.
+
+### Added
+- Export photos for one saved person, and Export all, one folder per person in the layout Batch import reads. Saved photos are stored encrypted, so this is how to get plain images back out.
+- The Video tab shows one progress window with Cancel while it scans or saves, instead of progress in the pane and the status bar at once.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added

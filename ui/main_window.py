@@ -1513,22 +1513,21 @@ class MainWindow(QMainWindow):
         worker.allFinished.connect(self._video_job_finished)
         worker.finished.connect(lambda: self._video_job_stopped(worker))
         self.video_job.set_running(True)
-        self.video_job.show_progress(0, f"Looking for {person.name}…")
+        self._open_job_dialog(f"Looking for {person.name}…")
         self.ready_text.setText(f"Finding {person.name} in the whole video…")
         worker.start()
 
     def _cancel_video_job(self) -> None:
         if self.job_worker and self.job_worker.isRunning():
             self.job_worker.cancel()
-            self.video_job.show_progress(self.video_job.progress.value(), "Cancelling…")
+            self._job_dialog_text("Cancelling…")
         if self.export_worker and self.export_worker.isRunning():
             self.export_worker.cancel()
 
     def _video_job_updated(self, _entry_id: str, status: str, progress: int, detail: str, outputs: list[str]) -> None:
         self._job_result = (status, detail, list(outputs) if outputs else self._job_result[2])
         if status not in {"completed", "no_match", "failed", "cancelled"}:
-            self.video_job.show_progress(progress, detail)
-            self.ready_text.setText(detail)
+            self._job_dialog_progress(progress, detail)
 
     def _video_job_ranges(self, _entry_id: str, _character_id: str, _name: str, ranges: list[ClipRange]) -> None:
         # Earlier automatic results are replaced; clips you marked by hand stay.
@@ -1560,7 +1559,38 @@ class MainWindow(QMainWindow):
         if queue:
             QTimer.singleShot(15, self._next_clip_thumbnail)
 
+    def _open_job_dialog(self, text: str) -> None:
+        # One progress window for the Video tab; it also keeps the editor still while a job runs.
+        self.job_dialog = QProgressDialog(text, "Cancel", 0, 100, self)
+        self.job_dialog.setWindowTitle("Clipivo")
+        self.job_dialog.setWindowModality(Qt.WindowModal)
+        self.job_dialog.setMinimumDuration(0)
+        self.job_dialog.setAutoClose(False)
+        self.job_dialog.setAutoReset(False)
+        self.job_dialog.setMinimumWidth(420)
+        self.job_dialog.canceled.connect(self._cancel_video_job)
+        self.job_dialog.show()
+
+    def _job_dialog_progress(self, percent: int, text: str) -> None:
+        dialog = getattr(self, "job_dialog", None)
+        if dialog:
+            dialog.setValue(max(0, min(100, int(percent))))
+            dialog.setLabelText(text)
+
+    def _job_dialog_text(self, text: str) -> None:
+        dialog = getattr(self, "job_dialog", None)
+        if dialog:
+            dialog.setLabelText(text)
+
+    def _close_job_dialog(self) -> None:
+        dialog = getattr(self, "job_dialog", None)
+        if dialog:
+            dialog.canceled.disconnect()
+            dialog.close()
+            self.job_dialog = None
+
     def _video_job_finished(self, cancelled: bool) -> None:
+        self._close_job_dialog()
         status, detail, outputs = self._job_result
         name = self.current_target.name if self.current_target else "The person"
         if cancelled or status == "cancelled":
@@ -1704,21 +1734,23 @@ class MainWindow(QMainWindow):
             ),
         )
         self.video_job.set_running(True)
-        self.video_job.show_progress(0, "Saving clips…")
+        self._open_job_dialog("Saving clips…")
         self.export_worker.progressed.connect(self._export_progressed)
         self.export_worker.succeeded.connect(self._export_succeeded)
         self.export_worker.failed.connect(self._export_failed)
         self.export_worker.start()
 
     def _export_progressed(self, done: int, total: int, text: str) -> None:
-        self.video_job.show_progress(round(done / max(1, total) * 100), text)
+        self._job_dialog_progress(round(done / max(1, total) * 100), text)
 
     def _export_succeeded(self, outputs: list[Path]) -> None:
+        self._close_job_dialog()
         folder = str(outputs[0].parent) if outputs else ""
         self.ready_text.setText("Saved")
         self.video_job.show_finished(f"Saved {len(outputs)} file{'s' if len(outputs) != 1 else ''}", folder)
 
     def _export_failed(self, detail: str) -> None:
+        self._close_job_dialog()
         self.ready_text.setText("Save failed")
         cancelled = "cancel" in detail.lower()
         self.video_job.show_finished(

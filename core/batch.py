@@ -8,6 +8,7 @@ import subprocess
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from statistics import median
 from queue import Empty, Full, Queue
 from threading import Event, Thread
 from typing import Callable
@@ -17,7 +18,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
-from .framing import FRAMINGS, MAX_SIZES, subject_from_hits
+from .framing import FRAMINGS, MAX_SIZES, find_static_band, split_shots
 from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
@@ -344,10 +345,6 @@ def analyse_video_for_characters(
             wait_if_paused,
             refine_progress,
         )
-        for clip in ranges:
-            clip.subject = subject_from_hits(
-                [hit for hit in target_hits if clip.start_ms <= hit.timestamp_ms <= clip.end_ms]
-            )
         results.append(CharacterAppearances(
             target.id,
             target.name,
@@ -508,6 +505,93 @@ def _scan_refinement_window(
     finally:
         container.close()
     return matches
+
+
+TRACK_STEP_MS = 400
+_CUT_DIFFERENCE = 24.0
+
+
+def track_person_in_clips(
+    source: Path,
+    face_engine: FaceEngine,
+    target_id: str,
+    reference_matrix,
+    threshold: float,
+    ranges: list[ClipRange],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+    wait_if_paused: Callable[[], bool] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> None:
+    """Fill each clip's `shots` and `frame` for person framing.
+
+    Every frame inside a clip is decoded to find camera cuts; the face is checked every
+    TRACK_STEP_MS, and a small greyscale copy of each checked frame is kept to find static
+    bottom graphics per shot.
+    """
+    import numpy as np
+
+    total = max(1, sum(clip.duration_ms for clip in ranges))
+    done = 0
+    for clip in ranges:
+        if cancelled and cancelled():
+            return
+        points: list[list[float]] = []
+        cuts: list[int] = []
+        smalls: list[tuple[int, object]] = []
+        frame_size = (0, 0)
+        previous = None
+        recent: list[float] = []
+        next_sample_ms = clip.start_ms
+        container = av.open(str(Path(source)))
+        try:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            if clip.start_ms:
+                container.seek(int((clip.start_ms / 1000) / float(stream.time_base)), stream=stream, backward=True, any_frame=False)
+            for frame in container.decode(stream):
+                if (cancelled and cancelled()) or (wait_if_paused and not wait_if_paused()):
+                    return
+                if frame.pts is None:
+                    continue
+                timestamp_ms = max(0, round(float(frame.pts * stream.time_base) * 1000))
+                if timestamp_ms > clip.end_ms:
+                    break
+                # Bottom graphics stay put across cuts; leave them out of the cut test.
+                tiny = frame.reformat(width=64, height=36, format="gray").to_ndarray().astype(np.float32)[:28]
+                if timestamp_ms >= clip.start_ms and previous is not None:
+                    difference = float(np.abs(tiny - previous).mean())
+                    typical = median(recent) if recent else 0.0
+                    if difference > _CUT_DIFFERENCE and difference > typical * 3 + 4:
+                        cuts.append(timestamp_ms)
+                    recent = (recent + [difference])[-12:]
+                previous = tiny
+                if timestamp_ms < clip.start_ms or timestamp_ms < next_sample_ms:
+                    continue
+                next_sample_ms = timestamp_ms + TRACK_STEP_MS
+                image = frame.to_ndarray(format="bgr24")
+                frame_size = (int(image.shape[1]), int(image.shape[0]))
+                smalls.append((timestamp_ms, frame.reformat(width=160, height=90, format="gray").to_ndarray()))
+                matcher = getattr(face_engine, "match_frame_many", None)
+                if callable(matcher):
+                    assessment = matcher(image, {target_id: (reference_matrix, threshold)})[target_id]
+                else:
+                    assessment = face_engine.match_frame(image, reference_matrix, threshold)
+                box = getattr(assessment, "box", None)
+                if assessment.matched and box:
+                    points.append([timestamp_ms, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[3] - box[1]])
+        finally:
+            container.close()
+        if frame_size[1]:
+            height = frame_size[1]
+            clip.frame = list(frame_size)
+            clip.shots = split_shots(
+                clip.start_ms, clip.end_ms, cuts, points,
+                lambda start, end: find_static_band([small for t, small in smalls if start <= t < end], height),
+            )
+        done += clip.duration_ms
+        if progress:
+            progress(done, total)
 
 
 def _merge_ranges(ranges: list[ClipRange], *, join_gap_ms: int = 250) -> list[ClipRange]:

@@ -35,9 +35,11 @@ class ClipRange:
     origin: str = "manual"
     enabled: bool = True
     id: str = field(default_factory=lambda: uuid4().hex)
-    # Where the person sits in this clip: [x_min, x_max, y, face_height, frame_w, frame_h]
-    # from face centres, used by person framing. None for clips marked by hand.
-    subject: list[float] | None = None
+    # Person framing data from tracking: camera shots with face samples [t_ms, cx, cy, face_h]
+    # and the top of any static bottom band, plus the frame size they were measured on.
+    # None for clips marked by hand or scanned without Follow person.
+    shots: list[dict] | None = None
+    frame: list[int] | None = None
 
     @property
     def duration_ms(self) -> int:
@@ -54,5 +56,6 @@ class ClipRange:
             end_ms=int(data["end_ms"]),
             origin=str(data.get("origin", "manual")),
             enabled=bool(data.get("enabled", True)),
-            subject=[float(value) for value in data["subject"]] if data.get("subject") else None,
+            shots=list(data["shots"]) if data.get("shots") else None,
+            frame=[int(value) for value in data["frame"]] if data.get("frame") else None,
         )

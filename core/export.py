@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -10,13 +13,49 @@ from threading import Event, Thread
 from typing import Callable
 
 from .filters import VideoFilter, active_filters, audio_filtergraph, video_filtergraph
-from .framing import crop_box, output_size, scale_filter
+from .framing import crop_filter, output_size, scale_filter, shot_crop
 from .models import ClipRange
 from .timecode import ffmpeg_time
 
 
 class ExportError(RuntimeError):
     pass
+
+
+def _with_framed_size(shape: OutputShape, clips: list[ClipRange]) -> OutputShape:
+    """One output size for every framed shot: the typical crop size, capped by the size limit."""
+    if shape.framing == "whole" or not all(shape.frame_size):
+        return shape
+    shorts = []
+    for clip in clips:
+        frame = tuple(clip.frame) if clip.frame else shape.frame_size
+        for shot in clip.shots or [{"start": clip.start_ms, "points": []}]:
+            width, height, _keys, _y = shot_crop(shot, shape.framing, frame)
+            shorts.append(min(width, height))
+    if not shorts:
+        return shape
+    short = sorted(shorts)[len(shorts) // 2]
+    if shape.max_short_side:
+        short = min(short, shape.max_short_side)
+    return replace(shape, out_short=max(2, int(short) // 2 * 2))
+
+
+def export_work_dir() -> Path:
+    """Scratch space for segments: Clipivo's cache, never the user's video folders."""
+    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "clipivo"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def clean_stale_work(max_age_hours: float = 6.0) -> None:
+    """Remove segment folders left by an export that was killed or crashed."""
+    cutoff = time.time() - max_age_hours * 3600
+    for folder in export_work_dir().glob("export-*"):
+        try:
+            if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+        except OSError:
+            continue
 
 
 @dataclass(frozen=True)
@@ -27,21 +66,35 @@ class OutputShape:
     max_short_side: int = 0
     framing: str = "whole"
     frame_size: tuple[int, int] = (0, 0)
+    # Shorter side of framed output; chosen from the typical crop so nothing is blown up.
+    out_short: int = 0
 
     def needs_reencode(self) -> bool:
         width, height = self.frame_size
         too_big = bool(self.max_short_side) and min(width, height) > self.max_short_side
         return self.quality < 100 or too_big or self.framing != "whole"
 
-    def chain_for(self, clip: ClipRange) -> tuple[str, str]:
-        """(before user filters, after user filters) for one clip."""
-        if self.framing != "whole" and all(self.frame_size):
-            x, y, w, h = crop_box(clip.subject, self.framing, self.frame_size)
-            out_w, out_h = output_size(self.framing, self.max_short_side)
-            return f"crop={w}:{h}:{x}:{y}", f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
-        if self.max_short_side:
-            return "", scale_filter(self.max_short_side)
-        return "", ""
+    def pieces(self, clip: ClipRange) -> list[tuple[ClipRange, tuple[str, str]]]:
+        """Split a clip into exportable pieces with (before, after) user-filter chains.
+
+        Whole picture is one piece. Follow person gives one piece per camera shot, each with
+        its own crop, all scaled to the same output size.
+        """
+        if self.framing == "whole" or not all(self.frame_size):
+            return [(clip, ("", scale_filter(self.max_short_side) if self.max_short_side else ""))]
+        frame = tuple(clip.frame) if clip.frame else self.frame_size
+        out_w, out_h = output_size(self.framing, self.out_short or self.max_short_side)
+        after = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
+        shots = clip.shots or [{"start": clip.start_ms, "end": clip.end_ms, "points": [], "band": None}]
+        pieces = []
+        for shot in shots:
+            start, end = max(clip.start_ms, int(shot["start"])), min(clip.end_ms, int(shot["end"]))
+            if end - start < 40:
+                continue
+            width, height, keys, y = shot_crop(shot, self.framing, frame)
+            piece = ClipRange(start, end, origin=clip.origin)
+            pieces.append((piece, (crop_filter(width, height, keys, y), after)))
+        return pieces or [(clip, (crop_filter(*shot_crop({"start": clip.start_ms, "points": []}, self.framing, frame)), after))]
 
 
 ProgressFn = Callable[[int, int, str], None]
@@ -101,10 +154,12 @@ def export_ranges(
             encoder_label = "Stream copy"
         else:
             encoder_label = "NVIDIA NVENC" if resolved_encoder == "nvenc" else "CPU libx264"
+        shape = _with_framed_size(shape or OutputShape(), enabled)
         if stitched:
+            pieces = [piece for clip in enabled for piece in shape.pieces(clip)]
             result = [
                 _export_stitched(
-                    source, enabled, output_dir, mode, include_audio, progress,
+                    source, pieces, output_dir, mode, include_audio, progress,
                     cancel_event, logs, target, filters, source_fps,
                     resolved_encoder, video_encoder == "auto", encoder_label, output_tag,
                     character_tail, source_video_bitrate_kbps, output_name, shape,
@@ -128,11 +183,22 @@ def export_ranges(
                 else:
                     generated_name = f"{base}_{index:03d}{suffix}"
                 clip_target = target or _unique_path(output_dir / generated_name)
-                _export_one(
-                    source, clip, clip_target, mode, include_audio, cancel_event,
-                    logs, filters, source_fps, resolved_encoder,
-                    video_encoder == "auto", clip_progress, source_video_bitrate_kbps, shape,
-                )
+                pieces = shape.pieces(clip)
+                if len(pieces) == 1:
+                    piece, chain = pieces[0]
+                    _export_one(
+                        source, piece, clip_target, mode, include_audio, cancel_event,
+                        logs, filters, source_fps, resolved_encoder,
+                        video_encoder == "auto", clip_progress, source_video_bitrate_kbps, shape, chain,
+                    )
+                else:
+                    _export_stitched(
+                        source, pieces, output_dir, mode, include_audio,
+                        lambda done, total, _text, report=clip_progress: report(done / max(1, total)),
+                        cancel_event, logs, clip_target, filters, source_fps, resolved_encoder,
+                        video_encoder == "auto", encoder_label, output_tag, character_tail,
+                        source_video_bitrate_kbps, output_name, shape,
+                    )
                 result.append(clip_target)
             progress(total_units, total_units, "Export complete")
         return result
@@ -145,7 +211,7 @@ def export_ranges(
 
 def _export_stitched(
     source: Path,
-    ranges: list[ClipRange],
+    ranges: list[tuple[ClipRange, tuple[str, str]]],
     output_dir: Path,
     mode: str,
     include_audio: bool,
@@ -167,10 +233,10 @@ def _export_stitched(
     suffix = ".mp4"
     base = output_name or f"{source.stem}_{output_tag}{character_tail}"
     target = target or _unique_path(output_dir / f"{base}{suffix}")
-    with tempfile.TemporaryDirectory(prefix=".clipivo-export-", dir=output_dir) as temporary:
+    with tempfile.TemporaryDirectory(prefix="export-", dir=export_work_dir()) as temporary:
         temp_dir = Path(temporary)
         segments: list[Path] = []
-        for index, clip in enumerate(ranges, start=1):
+        for index, (clip, chain) in enumerate(ranges, start=1):
             _check_cancel(cancel_event)
             total_units = (len(ranges) + 1) * 1000
             segment_progress = lambda fraction, segment_index=index: progress(
@@ -183,7 +249,7 @@ def _export_stitched(
             _export_one(
                 source, clip, segment, mode, include_audio, cancel_event, logs,
                 filters, source_fps, video_encoder, allow_encoder_fallback,
-                segment_progress, source_video_bitrate_kbps, shape,
+                segment_progress, source_video_bitrate_kbps, shape, chain,
             )
             segments.append(segment)
 
@@ -222,6 +288,7 @@ def _export_one(
     progress_fraction: FractionFn | None,
     source_video_bitrate_kbps: int = 0,
     shape: OutputShape | None = None,
+    chain: tuple[str, str] = ("", ""),
 ) -> None:
     shape = shape or OutputShape()
     duration = clip.duration_ms
@@ -247,7 +314,7 @@ def _export_one(
         ]
         if include_audio:
             command.extend(["-map", "0:a:0?"])
-        before, after = shape.chain_for(clip)
+        before, after = chain
         video_chain = ",".join(part for part in (before, video_filtergraph(filters, source_fps), after) if part)
         if video_chain:
             command.extend(["-vf", video_chain])

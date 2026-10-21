@@ -144,8 +144,14 @@ class PeoplePage(QWidget):
             self._batch_import,
         )
         self.batch_button.setIcon(line_icon("open", size=16))
+        self.export_all_button = self._button(
+            "Export all",
+            "Save every person's photos as plain images, one folder per person (the layout Batch import reads)",
+            self._export_all,
+        )
         reusable_toolbar.addWidget(self.new_button)
         reusable_toolbar.addWidget(self.batch_button)
+        reusable_toolbar.addWidget(self.export_all_button)
         reusable_toolbar.addStretch()
         self.rename_action = QAction("Rename…", self)
         self.rename_action.triggered.connect(self._rename_character)
@@ -172,6 +178,8 @@ class PeoplePage(QWidget):
         self.selection_title.setToolTip("Character currently being edited")
         selection_header.addWidget(self.selection_title)
         selection_header.addStretch()
+        self.export_button = self._button("Export photos", "Save this person's photos as plain images in a folder", self._export_current)
+        selection_header.addWidget(self.export_button)
         self.rename_button = self._button("Rename", "Rename this person", self._rename_character)
         self.delete_button = self._button("Delete person", "Delete this person and all their photos", self._delete_character)
         selection_header.addWidget(self.rename_button)
@@ -319,6 +327,7 @@ class PeoplePage(QWidget):
         self.rename_action.setEnabled(bool(persistent))
         self.delete_action.setEnabled(bool(persistent))
         self.rename_button.setEnabled(bool(persistent))
+        self.export_button.setEnabled(bool(persistent))
         self.delete_button.setEnabled(bool(persistent))
         self.add_references_button.setEnabled(selected)
         self.add_photos_action.setEnabled(selected)
@@ -327,6 +336,47 @@ class PeoplePage(QWidget):
         self.delete_reference_button.setEnabled(selected)
         self.validate_button.setEnabled(selected)
         self.test_button.setEnabled(selected)
+
+    def _write_photos(self, character: CharacterRecord, folder: Path) -> int:
+        folder.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for reference in self.store.references(character.id):
+            name = Path(reference.filename).name or f"photo-{written + 1:02d}.png"
+            target = folder / name
+            number = 2
+            while target.exists():
+                target = folder / f"{Path(name).stem} ({number}){Path(name).suffix}"
+                number += 1
+            target.write_bytes(self.store.reference_bytes(reference.id))
+            written += 1
+        return written
+
+    def _export_current(self) -> None:
+        if not self.store or not self.current_character:
+            return
+        folder = choose_directory(self, f"Export photos of {self.current_character.name} to", key="people_export")
+        if not folder:
+            return
+        target = Path(folder) / _folder_name(self.current_character.name)
+        count = self._write_photos(self.current_character, target)
+        QMessageBox.information(self, "Photos exported", f"Saved {count} photo{'s' if count != 1 else ''} to:\n{target}")
+
+    def _export_all(self) -> None:
+        if not self.store:
+            return
+        people = self.store.characters()
+        if not people:
+            QMessageBox.information(self, "Nobody saved", "Save a person first.")
+            return
+        folder = choose_directory(self, "Export everyone's photos to", key="people_export")
+        if not folder:
+            return
+        total = sum(self._write_photos(person, Path(folder) / _folder_name(person.name)) for person in people)
+        QMessageBox.information(
+            self, "Photos exported",
+            f"Saved {total} photos for {len(people)} {'person' if len(people) == 1 else 'people'} to:\n{folder}\n\n"
+            "Each person has their own folder, so Batch import can read it back.",
+        )
 
     def _character_context_menu(self, position) -> None:
         item = self.character_list.itemAt(position)
@@ -695,3 +745,8 @@ class PeoplePage(QWidget):
     def shutdown(self) -> None:
         if self._worker and self._worker.isRunning():
             self._worker.wait(5000)
+
+
+def _folder_name(name: str) -> str:
+    cleaned = "".join("_" if character in '/\\:*?"<>|' or ord(character) < 32 else character for character in name).strip(" .")
+    return cleaned or "Person"

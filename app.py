@@ -9,12 +9,15 @@ from pathlib import Path
 # playback surface on Wayland desktops.
 if sys.platform.startswith("linux") and os.environ.get("DISPLAY"):
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+# Without this the X11 window class is "python", so the desktop shows a generic icon and name.
+os.environ.setdefault("RESOURCE_NAME", "Clipivo")
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication
 
 from core.character_store import CharacterStore, CharacterStoreError
+from core.export import clean_stale_work
 from core.face_engine import InsightFaceEngine
 from ui.main_window import MainWindow
 from version import __app_name__, __org_name__, __version__
@@ -34,7 +37,13 @@ def main() -> int:
     app.setApplicationVersion(__version__)
     app.setOrganizationName(__org_name__)
     app.setStyle("Fusion")
+    app.setDesktopFileName("io.longweekendlabs.Clipivo")
+    app.setWindowIcon(QIcon.fromTheme("io.longweekendlabs.Clipivo", QIcon(str(PROJECT_DIR / "assets" / "clipivo.svg"))))
     load_fonts()
+    try:
+        clean_stale_work()
+    except OSError:
+        pass
 
     store = None
     store_error = ""
