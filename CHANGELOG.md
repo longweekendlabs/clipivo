@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- Settings has a Default save location. The Video tab and Batch start there each time Clipivo opens, and you can still pick another folder for one run. Until you set it, they start on "Same folder as video".
+- The Video tab has the same Original option as Batch: leave the video, move it into "Clipivo done", move it to a folder, or move it to the Trash once the result is saved and checked. A moved video is closed in the editor.
+
+### Known issues
+- Original quality starts each clip at the keyframe before the person appears. On files with a keyframe every few seconds, such as YouTube downloads, a stitched video can open with a few seconds of footage before she is on screen. Exact frames avoids this at the cost of re-encoding.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added
