@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from threading import Event
 
-from PySide6.QtCore import QSize, QThread, Qt, Signal
+from PySide6.QtCore import QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -436,7 +436,7 @@ class BatchPage(QWidget):
         self.job.startRequested.connect(self._start)
         self.job.cancelRequested.connect(self._cancel)
         self.job.pauseRequested.connect(self._toggle_pause)
-        self.job.applyToSelectedRequested.connect(self._apply_people_to_selected)
+        self.job.personToggled.connect(self._person_ticked)
         self.job.settingsChanged.connect(self._configuration_changed)
         self.job.selectionChanged.connect(self._configuration_changed)
         config_layout.addWidget(self.job)
@@ -539,16 +539,19 @@ class BatchPage(QWidget):
         if entry:
             self.openVideoRequested.emit(entry.path)
 
-    def _apply_people_to_selected(self) -> None:
-        entries = self._selected_entries()
-        if not entries:
-            self.job.status.setText("Select videos in the list first, then give them the ticked people.")
+    def _person_ticked(self, person_id: str, checked: bool) -> None:
+        """A tick on the right adds the person to every selected video; an untick removes them."""
+        if self._building or self.is_running():
             return
-        people = self.job.selected_ids()
+        entries = self._selected_entries()
         for entry in entries:
-            entry.person_ids = list(people)
-        self._populate_queue()
-        self._persist()
+            self._set_person(entry, person_id, checked)
+        if entries:
+            self._refresh_who_cells()
+            self._persist()
+            self._update_summary()
+            action = "Added to" if checked else "Removed from"
+            self.job.status.setText(f"{action} {len(entries)} selected video{'s' if len(entries) != 1 else ''}.")
 
     # People per video ------------------------------------------------------
 
@@ -590,20 +593,26 @@ class BatchPage(QWidget):
         return button
 
     def _toggle_person(self, entry: BatchVideoEntry, person_id: str, checked: bool) -> None:
+        # A change in one row's Who menu applies to the whole selection when that row is part of it.
+        selected = self._selected_entries()
+        for target in (selected if entry in selected else [entry]):
+            self._set_person(target, person_id, checked)
+        # Deferred: this runs inside the row button's own menu, which must not be deleted mid-click.
+        QTimer.singleShot(0, self._refresh_who_cells)
+        self._persist()
+        self._update_summary()
+
+    @staticmethod
+    def _set_person(entry: BatchVideoEntry, person_id: str, checked: bool) -> None:
         if checked and person_id not in entry.person_ids:
             entry.person_ids.append(person_id)
         elif not checked and person_id in entry.person_ids:
             entry.person_ids.remove(person_id)
-        row = self.configuration.videos.index(entry)
-        button = self.queue.cellWidget(row, 2)
-        if isinstance(button, QToolButton):
-            label, ok = self._people_label(entry)
-            button.setText(label)
-            button.setProperty("missing", not ok)
-            button.style().unpolish(button)
-            button.style().polish(button)
-        self._persist()
-        self._update_summary()
+
+    def _refresh_who_cells(self) -> None:
+        # Rebuilt so each row's menu shows the right ticks too; selection is kept.
+        for row, entry in enumerate(self.configuration.videos):
+            self.queue.setCellWidget(row, 2, self._who_button(entry))
 
     # Running ---------------------------------------------------------------
 
@@ -644,7 +653,7 @@ class BatchPage(QWidget):
                 self,
                 "Choose who to find",
                 f"These videos have nobody chosen, or a person who no longer exists:\n\n{names}{more}\n\n"
-                "Set them in the Who column, or select them and use Give to selected videos.",
+                "Select them (Ctrl+A selects all) and tick a person on the right, or use each row's Who column.",
             )
             return
         if not self.character_store or not self.face_engine:

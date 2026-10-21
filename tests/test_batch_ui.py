@@ -75,13 +75,20 @@ class BatchUiTests(unittest.TestCase):
             self.assertIsNone(page.worker)
 
             page.one_time.add([("guest.png", b"guest")])
-            page.queue.selectRow(1)
-            for row in range(page.characters.count()):
-                item = page.characters.item(row)
-                item.setCheckState(Qt.Checked if item.text().startswith(("Sam", "One-time")) else Qt.Unchecked)
-            page._apply_people_to_selected()
-            self.assertEqual(sorted(page.configuration.videos[1].person_ids), sorted([self.sam.id, "__one_time__"]))
-            self.assertEqual(page.configuration.videos[0].person_ids, [self.alex.id])
+            page.queue.selectAll()
+            sam_row = next(row for row in range(page.characters.count()) if page.characters.item(row).text().startswith("Sam"))
+            page.characters.item(sam_row).setCheckState(Qt.Checked)
+            self.assertTrue(all(self.sam.id in entry.person_ids for entry in page.configuration.videos))
+            self.assertIn("Sam", page.queue.cellWidget(1, 2).text())
+            page.characters.item(sam_row).setCheckState(Qt.Unchecked)
+            self.assertFalse(any(self.sam.id in entry.person_ids for entry in page.configuration.videos))
+            page._toggle_person(page.configuration.videos[0], self.sam.id, True)
+            self.assertTrue(all(self.sam.id in entry.person_ids for entry in page.configuration.videos))
+            page.queue.clearSelection()
+            page._toggle_person(page.configuration.videos[1], self.sam.id, False)
+            self.assertIn(self.sam.id, page.configuration.videos[0].person_ids)
+            self.assertNotIn(self.sam.id, page.configuration.videos[1].person_ids)
+            self.assertEqual(page.configuration.videos[0].person_ids[0], self.alex.id)
         finally:
             page.close()
 

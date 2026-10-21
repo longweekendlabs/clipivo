@@ -108,7 +108,8 @@ class JobPanel(QWidget):
     startRequested = Signal()
     cancelRequested = Signal()
     pauseRequested = Signal()
-    applyToSelectedRequested = Signal()
+    # Batch: a person was ticked or unticked by the user (person id, ticked).
+    personToggled = Signal(str, bool)
 
     def __init__(
         self,
@@ -146,7 +147,7 @@ class JobPanel(QWidget):
 
         self.who_header = QHBoxLayout()
         self.who_header.setContentsMargins(0, 0, 0, 0)
-        who_title = QLabel("Who · for videos you add" if multiple else "Who")
+        who_title = QLabel("Who · for selected and new videos" if multiple else "Who")
         who_title.setObjectName("sectionTitle")
         self.who_header.addWidget(who_title)
         self.who_header.addStretch()
@@ -156,14 +157,13 @@ class JobPanel(QWidget):
             self.people_list.setObjectName("batchCharacters")
             self.people_list.setMinimumHeight(84)
             self.people_list.setMaximumHeight(150)
-            self.people_list.setToolTip("Ticked people are given to videos you add next")
+            self.people_list.setToolTip(
+                "Ticking a person adds them to every video selected on the left (Ctrl+A selects all), "
+                "and to videos you add next. Unticking removes them."
+            )
             self.people_list.itemChanged.connect(self._people_changed)
             self.people_list.currentItemChanged.connect(lambda *_args: self._update_photos())
             layout.addWidget(self.people_list)
-            self.apply_button = QPushButton("Give to selected videos")
-            self.apply_button.setToolTip("Replace who is looked for in the videos selected in the list")
-            self.apply_button.clicked.connect(self.applyToSelectedRequested.emit)
-            layout.addWidget(self.apply_button)
             self.person_combo = None
         else:
             self.person_combo = QComboBox()
@@ -428,10 +428,14 @@ class JobPanel(QWidget):
             return len(self.one_time.references)
         return len(self.store.references(person.id)) if self.store else 0
 
-    def _people_changed(self, *_args) -> None:
+    def _people_changed(self, *args) -> None:
         self._update_photos()
-        if not self._loading:
-            self.selectionChanged.emit()
+        if self._loading:
+            return
+        item = args[0] if args and isinstance(args[0], QListWidgetItem) else None
+        if self.multiple and item is not None and isinstance(item.data(Qt.UserRole), Person):
+            self.personToggled.emit(item.data(Qt.UserRole).id, item.checkState() == Qt.Checked)
+        self.selectionChanged.emit()
 
     def _update_photos(self) -> None:
         if self.multiple:
@@ -714,8 +718,6 @@ class JobPanel(QWidget):
         for widget in (self.arrangement, self.quality, self.max_size, self.framing, self.destination, self.include_audio, self.add_photos_button,
                        self.naming, self.custom_name, *([self.source_after] if self.source_after else [])):
             widget.setEnabled(not running)
-        if self.people_list is not None:
-            self.apply_button.setEnabled(not running)
         if self.person_combo is not None:
             self.person_combo.setEnabled(not running)
         if self.people_list is not None:

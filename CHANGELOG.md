@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-21
+
+### Fixed
+- Choosing who to find for many Batch videos at once. Select videos in the list (click, Ctrl+click, Shift+click or Ctrl+A) and tick a person on the right: they are added to every selected video, and unticking removes them. A change in one row's Who menu applies to all selected rows when that row is part of the selection. The ticks also still decide who new videos get. The separate "Give to selected videos" button is gone.
+
 ## [0.6.1] - 2026-10-21
 
 ### Added
