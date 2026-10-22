@@ -16,6 +16,15 @@ def ffmpeg_time(milliseconds: int) -> str:
 
 
 
+def format_remaining(milliseconds: float) -> str:
+    """Rounded time left: 'under a minute', '12 min', '2 h 05 min'."""
+    minutes = round(max(0.0, milliseconds) / 60_000)
+    if minutes < 1:
+        return "under a minute"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min" if hours else f"{minutes} min"
+
+
 def format_duration(milliseconds: int) -> str:
     """Short human duration: 4:01 or 1:02:03."""
     total = max(0, round(int(milliseconds) / 1000))

@@ -40,7 +40,7 @@ Frame can follow the person. Choose landscape, portrait or square and Clipivo tr
 
 Drop videos or whole folders into Batch. Every video has its own Who column, and Clipivo looks only for the people listed there, so one queue can hold three videos for one person and five for another. Select any number of videos and tick a person to add them to all of them at once. Start will not run while a video has nobody chosen.
 
-Save results next to each video, into a "Clipivo done" folder beside it, or into a folder you choose. Then choose what happens to each original once its results are saved and checked: leave it, move it into a "Clipivo source" folder beside it, move it to a folder you choose, or move it to the Trash. Adding the same folder again later skips both, so nothing is processed twice. Nothing is moved for a video that failed, was cancelled, or where someone was not found. The queue pauses, cancels safely and survives a restart.
+Save results next to each video, into a "Clipivo done" folder beside it, or into a folder you choose. Then choose what happens to each original once its results are saved and checked: leave it, move it into a "Clipivo source" folder beside it, move it to a folder you choose, or move it to the Trash. Adding the same folder again later skips both, so nothing is processed twice. Nothing is moved for a video that failed, was cancelled, or where someone was not found. The list shows each video's length and cover, and while it runs, how long is left for the current video and the whole queue. Scans run at low priority so the rest of your computer stays responsive. The queue pauses, cancels safely and survives a restart.
 
 ## Names you choose
 

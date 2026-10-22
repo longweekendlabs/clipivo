@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-22
+
+### Added
+- Batch shows each video's length in a new Length column, and while it runs, an estimate of the time left for the current video and for the whole queue, worked out from how fast this run has gone. Time spent paused is left out.
+
+### Changed
+- Scans and saves run at lower CPU priority, so the desktop and other programs such as a media server stay responsive. When nothing else needs the CPU, they run at full speed.
+- The Batch list stays readable and scrollable while it runs instead of turning grey. Only the Run ticks and the Who column are locked until the run ends.
+
 ## [0.6.2] - 2026-10-21
 
 ### Fixed

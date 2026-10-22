@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core.naming import output_base_name, video_id
+from core.timecode import format_remaining
 
 
 class NamingTests(unittest.TestCase):
@@ -32,6 +33,13 @@ class NamingTests(unittest.TestCase):
             output_base_name(Path("holiday video.mkv"), "custom_id", "", "Merve Ekinci", self.when),
             "clipivo.holiday_video_Merve_Ekinci",
         )
+
+
+class RemainingTests(unittest.TestCase):
+    def test_rounded_time_left(self) -> None:
+        self.assertEqual(format_remaining(20_000), "under a minute")
+        self.assertEqual(format_remaining(12 * 60_000), "12 min")
+        self.assertEqual(format_remaining(125 * 60_000), "2 h 05 min")
 
 
 if __name__ == "__main__":

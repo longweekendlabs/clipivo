@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -31,6 +32,7 @@ from core.batch import (
     discover_videos,
     load_batch_configuration,
     handle_finished_source,
+    lower_thread_priority,
     track_person_in_clips,
     save_batch_configuration,
     validate_export,
@@ -41,7 +43,7 @@ from core.naming import output_base_name
 from core.face_engine import FaceEngine
 from core.filters import VideoFilter
 from core.models import ClipRange
-from core.timecode import format_duration
+from core.timecode import format_duration, format_remaining
 from core.video_probe import probe_video
 
 from .job_panel import JobPanel, OneTimePerson
@@ -86,6 +88,7 @@ class BatchExecutionWorker(QThread):
         self._pause_event.set()
 
     def run(self) -> None:
+        lower_thread_priority()
         cancelled = False
         for entry in self.configuration.videos:
             if not entry.enabled:
@@ -249,10 +252,13 @@ def _take_wanted_name(path: Path, wanted: str) -> Path:
     return target
 
 
-class _CoverWorker(QThread):
-    """Pulls embedded cover pictures (YouTube thumbnails) for queue rows, one file at a time."""
+COL_RUN, COL_VIDEO, COL_LENGTH, COL_WHO, COL_STATUS, COL_PROGRESS = range(6)
 
-    found = Signal(str, str)
+
+class _CoverWorker(QThread):
+    """Reads each queued video's length and embedded cover (YouTube thumbnail), one file at a time."""
+
+    found = Signal(str, str, int)
 
     def __init__(self, paths: list[str], parent=None):
         super().__init__(parent)
@@ -266,7 +272,11 @@ class _CoverWorker(QThread):
                 cover = extract_cover(Path(path), max_width=160)
             except OSError:
                 cover = None
-            self.found.emit(path, str(cover) if cover else "")
+            try:
+                duration = probe_video(Path(path), include_keyframes=False).duration_ms
+            except Exception:  # noqa: BLE001 - a missing or unreadable file just shows no length
+                duration = 0
+            self.found.emit(path, str(cover) if cover else "", int(duration))
 
 
 class _QueueTable(QTableWidget):
@@ -325,6 +335,11 @@ class BatchPage(QWidget):
         self._paused = False
         self._foreground_busy = False
         self._covers: dict[str, QIcon | None] = {}
+        self._requested: set[str] = set()
+        self._run_ids: set[str] = set()
+        self._run_started = 0.0
+        self._paused_since = 0.0
+        self._paused_total = 0.0
         self._cover_workers: set[_CoverWorker] = set()
         self._building = True
         self._build_ui()
@@ -392,20 +407,21 @@ class BatchPage(QWidget):
         tools.addStretch()
         queue_layout.addLayout(tools)
 
-        self.queue = _QueueTable(0, 5)
+        self.queue = _QueueTable(0, 6)
         self.queue.setObjectName("batchQueue")
-        self.queue.setHorizontalHeaderLabels(("Run", "Video", "Who", "Status", "Progress"))
+        self.queue.setHorizontalHeaderLabels(("Run", "Video", "Length", "Who", "Status", "Progress"))
         self.queue.verticalHeader().hide()
         self.queue.setIconSize(QSize(64, 36))
         self.queue.setSelectionBehavior(QTableWidget.SelectRows)
         self.queue.setSelectionMode(QTableWidget.ExtendedSelection)
         self.queue.setAlternatingRowColors(True)
         self.queue.setToolTip("Drop videos or folders here. Double-click a video to open it in the Video tab.")
-        self.queue.horizontalHeader().resizeSection(0, 42)
-        self.queue.horizontalHeader().resizeSection(2, 190)
-        self.queue.horizontalHeader().resizeSection(3, 280)
-        self.queue.horizontalHeader().resizeSection(4, 110)
-        self.queue.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.queue.horizontalHeader().resizeSection(COL_RUN, 42)
+        self.queue.horizontalHeader().resizeSection(COL_LENGTH, 70)
+        self.queue.horizontalHeader().resizeSection(COL_WHO, 170)
+        self.queue.horizontalHeader().resizeSection(COL_STATUS, 270)
+        self.queue.horizontalHeader().resizeSection(COL_PROGRESS, 100)
+        self.queue.horizontalHeader().setSectionResizeMode(COL_VIDEO, QHeaderView.Stretch)
         self.queue.itemChanged.connect(self._queue_item_changed)
         self.queue.itemDoubleClicked.connect(lambda _item: self._open_selected())
         self.queue.itemSelectionChanged.connect(self._update_actions)
@@ -612,7 +628,7 @@ class BatchPage(QWidget):
     def _refresh_who_cells(self) -> None:
         # Rebuilt so each row's menu shows the right ticks too; selection is kept.
         for row, entry in enumerate(self.configuration.videos):
-            self.queue.setCellWidget(row, 2, self._who_button(entry))
+            self.queue.setCellWidget(row, COL_WHO, self._who_button(entry))
 
     # Running ---------------------------------------------------------------
 
@@ -686,6 +702,10 @@ class BatchPage(QWidget):
         worker.finished.connect(self._worker_stopped)
         worker.finished.connect(worker.deleteLater)
         self._paused = False
+        self._run_ids = run_ids
+        self._run_started = time.monotonic()
+        self._paused_since = 0.0
+        self._paused_total = 0.0
         self.job.set_running(True)
         self.job.show_progress(0, f"Starting {len(entries)} video{'s' if len(entries) != 1 else ''}…")
         self.runningChanged.emit(True)
@@ -696,6 +716,11 @@ class BatchPage(QWidget):
         if not self.is_running():
             return
         self._paused = not self._paused
+        if self._paused:
+            self._paused_since = time.monotonic()
+        elif self._paused_since:
+            self._paused_total += time.monotonic() - self._paused_since
+            self._paused_since = 0.0
         self.worker.set_paused(self._paused or self._foreground_busy)
         self.job.set_running(True, paused=self._paused)
 
@@ -711,18 +736,44 @@ class BatchPage(QWidget):
         if outputs:
             entry.outputs = list(outputs)
         row = self.configuration.videos.index(entry)
-        status_item = self.queue.item(row, 3)
+        status_item = self.queue.item(row, COL_STATUS)
         status_item.setText(detail)
         status_item.setToolTip(detail)
-        bar = self.queue.cellWidget(row, 4)
+        bar = self.queue.cellWidget(row, COL_PROGRESS)
         if isinstance(bar, QProgressBar):
             bar.setValue(progress)
             bar.setFormat(f"{progress}%")
         active = [item for item in self.configuration.videos if item.status in {"queued", "analysing", "exporting"}]
         done = [item for item in self.configuration.videos if item.status in {"completed", "no_match", "failed"}]
         overall = round((len(done) * 100 + sum(item.progress for item in active if item.status != "queued")) / max(1, len(done) + len(active)))
-        self.job.show_progress(overall, f"{entry.path.name}: {detail}")
+        self.job.show_progress(overall, f"{entry.path.name}: {detail}\n{self._time_left(entry)}")
         self._persist()
+
+    def _time_left(self, current: BatchVideoEntry) -> str:
+        """Estimate from how fast this run has gone so far, measured in video length per second."""
+        entries = [entry for entry in self.configuration.videos if entry.id in self._run_ids]
+        if not entries or not all(entry.duration_ms for entry in entries):
+            return "Estimating time left…"
+        finished = {"completed", "no_match", "failed", "cancelled"}
+        processed = sum(
+            entry.duration_ms if entry.status in finished else entry.duration_ms * entry.progress / 100
+            for entry in entries
+        )
+        paused = self._paused_total + (time.monotonic() - self._paused_since if self._paused_since else 0.0)
+        elapsed = time.monotonic() - self._run_started - paused
+        if elapsed < 20 or processed <= 0:
+            return "Estimating time left…"
+        rate = processed / elapsed  # video milliseconds handled per second
+        this_video = current.duration_ms * (100 - current.progress) / 100 / rate * 1000
+        remaining = sum(
+            0 if entry.status in finished else entry.duration_ms * (100 - entry.progress) / 100
+            for entry in entries
+        ) / rate * 1000
+        number = entries.index(current) + 1 if current in entries else 0
+        return (
+            f"Video {number} of {len(entries)} · about {format_remaining(this_video)} left for this one, "
+            f"about {format_remaining(remaining)} for all"
+        )
 
     def _batch_finished(self, cancelled: bool) -> None:
         self.runningChanged.emit(False)
@@ -752,9 +803,15 @@ class BatchPage(QWidget):
         self._update_actions()
 
     def _queue_item_changed(self, item: QTableWidgetItem) -> None:
-        if self._building or item.column() != 0:
+        if self._building or item.column() != COL_RUN:
             return
         entry = self._entry_for_row(item.row())
+        if entry and self.is_running():
+            # The list stays readable during a run, but the queue itself is fixed until it ends.
+            self._building = True
+            item.setCheckState(Qt.Checked if entry.enabled else Qt.Unchecked)
+            self._building = False
+            return
         if entry:
             entry.enabled = item.checkState() == Qt.Checked
             self._persist()
@@ -769,24 +826,28 @@ class BatchPage(QWidget):
             run_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
             run_item.setCheckState(Qt.Checked if entry.enabled else Qt.Unchecked)
             run_item.setToolTip("Include this video when you press Start")
-            self.queue.setItem(row, 0, run_item)
+            self.queue.setItem(row, COL_RUN, run_item)
             video_item = QTableWidgetItem(entry.path.name)
             video_item.setData(Qt.UserRole, entry.id)
             video_item.setToolTip(str(entry.path))
             icon = self._covers.get(entry.source)
             if icon is not None:
                 video_item.setIcon(icon)
-            self.queue.setItem(row, 1, video_item)
-            self.queue.setCellWidget(row, 2, self._who_button(entry))
+            self.queue.setItem(row, COL_VIDEO, video_item)
+            length_item = QTableWidgetItem(format_duration(entry.duration_ms) if entry.duration_ms else "")
+            length_item.setTextAlignment(Qt.AlignCenter)
+            length_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.queue.setItem(row, COL_LENGTH, length_item)
+            self.queue.setCellWidget(row, COL_WHO, self._who_button(entry))
             detail = "Waiting" if entry.detail == "Ready" else entry.detail
             status_item = QTableWidgetItem(detail)
             status_item.setToolTip(detail)
-            self.queue.setItem(row, 3, status_item)
+            self.queue.setItem(row, COL_STATUS, status_item)
             progress = QProgressBar()
             progress.setRange(0, 100)
             progress.setValue(entry.progress)
             progress.setFormat(f"{entry.progress}%")
-            self.queue.setCellWidget(row, 4, progress)
+            self.queue.setCellWidget(row, COL_PROGRESS, progress)
             self.queue.setRowHeight(row, 40)
         self._building = was_building
         self._request_covers()
@@ -795,26 +856,33 @@ class BatchPage(QWidget):
         self._update_actions()
 
     def _request_covers(self) -> None:
-        missing = [entry.source for entry in self.configuration.videos if entry.source not in self._covers]
+        missing = list(dict.fromkeys(
+            entry.source for entry in self.configuration.videos if entry.source not in self._requested
+        ))
         if not missing:
             return
-        for path in missing:
-            self._covers[path] = None  # requested; filled in when found
+        self._requested.update(missing)
         worker = _CoverWorker(missing, self)
         self._cover_workers.add(worker)
         worker.found.connect(self._cover_found)
         worker.finished.connect(lambda: (self._cover_workers.discard(worker), worker.deleteLater()))
         worker.start()
 
-    def _cover_found(self, path: str, cover: str) -> None:
-        if not cover:
-            return
-        icon = QIcon(QPixmap(cover))
+    def _cover_found(self, path: str, cover: str, duration_ms: int) -> None:
+        icon = QIcon(QPixmap(cover)) if cover else QIcon()
         self._covers[path] = icon
         for row, entry in enumerate(self.configuration.videos):
-            item = self.queue.item(row, 1)
-            if entry.source == path and item is not None:
-                item.setIcon(icon)
+            if entry.source != path:
+                continue
+            if duration_ms and not entry.duration_ms:
+                entry.duration_ms = duration_ms
+            video_item = self.queue.item(row, COL_VIDEO)
+            if video_item is not None and cover:
+                video_item.setIcon(icon)
+            length_item = self.queue.item(row, COL_LENGTH)
+            if length_item is not None and entry.duration_ms:
+                length_item.setText(format_duration(entry.duration_ms))
+        self._update_summary()
 
     def closeEvent(self, event) -> None:
         self.shutdown()
@@ -890,4 +958,8 @@ class BatchPage(QWidget):
             entry.status in {"completed", "no_match"} for entry in self.configuration.videos
         ))
         self.open_editor_button.setEnabled(selected)
-        self.queue.setEnabled(not running)
+        # The list stays readable and scrollable during a run; only who and what runs is locked.
+        for row in range(self.queue.rowCount()):
+            button = self.queue.cellWidget(row, COL_WHO)
+            if button is not None:
+                button.setEnabled(not running)

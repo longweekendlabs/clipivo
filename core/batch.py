@@ -54,6 +54,7 @@ class BatchVideoEntry:
     id: str = field(default_factory=lambda: uuid4().hex)
     # Only these people are looked for in this video.
     person_ids: list[str] = field(default_factory=list)
+    duration_ms: int = 0
 
     @property
     def path(self) -> Path:
@@ -77,6 +78,7 @@ class BatchVideoEntry:
             detail=str(payload.get("detail", "Ready")),
             outputs=[str(item) for item in payload.get("outputs", [])],
             person_ids=[str(item) for item in payload.get("person_ids", [])],
+            duration_ms=max(0, int(payload.get("duration_ms", 0) or 0)),
         )
 
 
@@ -230,6 +232,7 @@ class _SampledFrames(Thread):
         self.error: BaseException | None = None
 
     def run(self) -> None:
+        lower_thread_priority()
         try:
             container = av.open(str(self.source))
             try:
@@ -647,6 +650,17 @@ def validate_export(path: Path, *, expected_duration_ms: int = 0) -> None:
     if completed.returncode != 0:
         detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "tail decode failed"
         raise RuntimeError(f"Export is not playable through its ending: {detail}")
+
+
+def lower_thread_priority(niceness: int = 10) -> None:
+    """Run the calling thread, and the decoder threads and FFmpeg processes it starts, at
+    lower CPU priority so the desktop and other apps stay responsive during long scans."""
+    try:
+        import threading
+
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), niceness)
+    except (AttributeError, OSError):
+        pass
 
 
 def move_source_to_folder(source: Path, folder: Path) -> Path:

@@ -59,7 +59,7 @@ class BatchUiTests(unittest.TestCase):
             self.assertEqual(page.queue.rowCount(), 1)
             self.assertEqual(page.queue.item(0, 1).text(), "source video.mp4")
             self.assertEqual(page.configuration.videos[0].person_ids, [self.alex.id])
-            self.assertEqual(page.queue.cellWidget(0, 2).text(), "Alex")
+            self.assertEqual(page.queue.cellWidget(0, 3).text(), "Alex")
             self.assertIn("Alex 1", page.summary.text())
 
             second = self.root / "second.mkv"
@@ -67,7 +67,7 @@ class BatchUiTests(unittest.TestCase):
             page.characters.item(0).setCheckState(Qt.Unchecked)
             page.add_dropped([self.root])
             self.assertEqual(page.queue.rowCount(), 2)
-            self.assertEqual(page.queue.cellWidget(1, 2).text(), "Choose who…")
+            self.assertEqual(page.queue.cellWidget(1, 3).text(), "Choose who…")
             self.assertIn("1 without anyone", page.summary.text())
             with patch("ui.batch_page.QMessageBox.information") as told:
                 page._start()
@@ -79,7 +79,7 @@ class BatchUiTests(unittest.TestCase):
             sam_row = next(row for row in range(page.characters.count()) if page.characters.item(row).text().startswith("Sam"))
             page.characters.item(sam_row).setCheckState(Qt.Checked)
             self.assertTrue(all(self.sam.id in entry.person_ids for entry in page.configuration.videos))
-            self.assertIn("Sam", page.queue.cellWidget(1, 2).text())
+            self.assertIn("Sam", page.queue.cellWidget(1, 3).text())
             page.characters.item(sam_row).setCheckState(Qt.Unchecked)
             self.assertFalse(any(self.sam.id in entry.person_ids for entry in page.configuration.videos))
             page._toggle_person(page.configuration.videos[0], self.sam.id, True)
@@ -89,6 +89,25 @@ class BatchUiTests(unittest.TestCase):
             self.assertIn(self.sam.id, page.configuration.videos[0].person_ids)
             self.assertNotIn(self.sam.id, page.configuration.videos[1].person_ids)
             self.assertEqual(page.configuration.videos[0].person_ids[0], self.alex.id)
+        finally:
+            page.close()
+
+    def test_time_left_uses_this_runs_speed_and_ignores_pauses(self) -> None:
+        page = BatchPage(self.store, AvailableEngine())
+        try:
+            first = BatchVideoEntry(str(self.video), person_ids=[self.alex.id], duration_ms=600_000, status="completed", progress=100)
+            second = BatchVideoEntry(str(self.video), person_ids=[self.alex.id], duration_ms=1_200_000, status="analysing", progress=50)
+            page.configuration.videos = [first, second]
+            page._run_ids = {first.id, second.id}
+            with patch("ui.batch_page.time.monotonic", return_value=1000.0):
+                page._run_started = 1000.0 - 160.0
+                page._paused_total = 40.0  # 120 s of work handled 600 s + 600 s of video
+                text = page._time_left(second)
+            self.assertIn("Video 2 of 2", text)
+            self.assertIn("about 1 min left for this one", text)
+            self.assertIn("about 1 min for all", text)
+            restored = BatchVideoEntry.from_dict(second.to_dict())
+            self.assertEqual(restored.duration_ms, 1_200_000)
         finally:
             page.close()
 
