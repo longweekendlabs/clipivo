@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-10-26
+
+### Fixed
+- In the Linux packages, Open video, Add photos and every other file chooser did nothing, and saving clips and reading videos through ffmpeg failed. The packaged app runs with its own Qt, GLib, OpenSSL and libstdc++ on the library path, and the programs it starts (kdialog, zenity, ffmpeg, and xdg-open behind Open folder and links) inherited that and could not start. Clipivo now hands those programs your system's normal environment.
+- Settings scrolls when the window is short, instead of squashing every row.
+- Face matching says plainly where it runs and what to do: on the GPU (with the card's name), or on the CPU with "Use NVIDIA GPU · 1.5 GB" on the same row when your card could be used. The separate, contradictory status line is gone.
+- The model notice in Settings no longer calls Clipivo a private development build.
+
+### Changed
+- `clipivo --self-test` now starts every program Clipivo launches, saves and decodes a real clip, checks Qt's image plugins and names the keyring, so a build with any of these broken fails before release.
+
+
 ## [0.7.5] - 2026-10-26
 
 0.7.4 was tagged but not published: a test of the model check failed on GitHub's build machine, where a file rewritten within the same instant kept its timestamp. The app itself was unaffected; the test now sets the new time.

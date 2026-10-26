@@ -142,6 +142,7 @@ class DownloadBox(QWidget):
         if self.worker is not None:
             return
         pending = self._items()
+        self.download_button.setVisible(bool(pending))
         self.download_button.setEnabled(bool(pending))
         self.download_button.setText(
             f"Download {_megabytes(sum(item.size for item in pending))}" if pending else "Nothing to download"
@@ -304,8 +305,9 @@ def _nvidia_name() -> str:
         return ""
 
 
-def device_status(engine) -> tuple[bool, str]:
-    """(on the GPU, description) for face matching."""
+def device_status(engine) -> tuple[bool | None, str]:
+    """(mark, description) for face matching: True on a GPU, None on the CPU while the GPU
+    could be used (an action is offered), True on the CPU when nothing faster is possible."""
     names = {"CUDAExecutionProvider": "CUDA", "DmlExecutionProvider": "DirectML", "CoreMLExecutionProvider": "Core ML"}
     try:
         from core.face_models import execution_providers
@@ -313,21 +315,24 @@ def device_status(engine) -> tuple[bool, str]:
         available = execution_providers()
     except Exception as exc:  # noqa: BLE001
         return False, f"ONNX Runtime did not load: {exc}"
-    active = None
     application = getattr(engine, "_application", None) if engine else None
-    if application is not None:
-        active = application.providers[0]
+    active = application.providers[0] if application is not None else None
     wants_gpu = getattr(engine, "use_gpu", True)
     chosen = active or (available[0] if wants_gpu else "CPUExecutionProvider")
-    if chosen == "CPUExecutionProvider":
-        reason = "the GPU is turned off below" if not wants_gpu and available[0] != "CPUExecutionProvider" else "no GPU acceleration in this build"
-        if downloads.gpu_pack_offered():
-            reason = "your NVIDIA card can be used with NVIDIA's CUDA libraries, an optional download in Settings › Local face engine"
-        return False, f"{'Running' if active else 'Runs'} on the CPU · {reason}"
-    label = names.get(chosen, chosen)
-    card = _nvidia_name() if chosen == "CUDAExecutionProvider" else ""
-    extra = " · from Clipivo's CUDA download" if chosen == "CUDAExecutionProvider" and downloads.gpu_pack_installed() else ""
-    return True, f"{'Running' if active else 'Runs'} on {label}{' · ' + card if card else ''}{extra}"
+    card = _nvidia_name()
+    if chosen != "CPUExecutionProvider":
+        label = names.get(chosen, chosen)
+        extra = " · CUDA from Clipivo's download" if chosen == "CUDAExecutionProvider" and downloads.gpu_pack_installed() else ""
+        device = f" ({card})" if chosen == "CUDAExecutionProvider" and card else ""
+        return True, f"On the GPU through {label}{device}{extra}"
+    if not wants_gpu and available[0] != "CPUExecutionProvider":
+        return None, "On the CPU because “Use the GPU when available” is off in Local face engine"
+    if downloads.gpu_pack_installed():
+        return None, "NVIDIA's CUDA libraries are downloaded · restart Clipivo to use the GPU"
+    if downloads.gpu_pack_offered():
+        return None, (f"On the CPU · it works, but {card or 'your NVIDIA card'} would make scans and following a "
+                      "person several times faster with NVIDIA's CUDA libraries, a one-time download")
+    return True, "On the CPU · this computer has no graphics card Clipivo can use"
 
 
 class ComponentsPanel(QWidget):
@@ -348,7 +353,16 @@ class ComponentsPanel(QWidget):
             row.setOpenExternalLinks(True)
             row.setTextInteractionFlags(Qt.TextBrowserInteraction)
             self.rows[key] = row
-            layout.addWidget(row)
+            if key == "device":
+                # The GPU action sits on the row it changes.
+                self.gpu_button = QPushButton()
+                self.gpu_button.clicked.connect(self._gpu_clicked)
+                line = QHBoxLayout()
+                line.addWidget(row, 1)
+                line.addWidget(self.gpu_button, 0, Qt.AlignVCenter)
+                layout.addLayout(line)
+            else:
+                layout.addWidget(row)
         self.where = QLabel()
         self.where.setWordWrap(True)
         self.where.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -392,12 +406,47 @@ class ComponentsPanel(QWidget):
                              f"{reason} · Clipivo uses the VLC installed on this computer and never installs its own · "
                              f"<a href='{VLC_URL}' style='color:{PALETTE['accent']}'>Get VLC</a>")
         self.rows["vlc"].setText(vlc)
-        on_gpu, detail = device_status(self.engine)
-        # The CPU is not an error, only slower: a neutral mark, not a cross.
-        self.rows["device"].setText(self._line(True if on_gpu else None, "Face matching", detail))
+        mark, detail = device_status(self.engine)
+        self.rows["device"].setText(self._line(mark, "Face matching", detail))
+        installed = downloads.gpu_pack_installed()
+        self.gpu_button.setVisible(installed or downloads.gpu_pack_offered())
+        self.gpu_button.setText("Remove CUDA download" if installed else "Use NVIDIA GPU · 1.5 GB")
         self.where.setText(f"Clipivo keeps what it downloads in {downloads.data_dir()}. "
                            "A copy already on this computer, from another app, is used instead of downloading again.")
         self.box.refresh()
+
+
+    def _gpu_clicked(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        if downloads.gpu_pack_installed():
+            downloads.remove_gpu_pack()
+            QMessageBox.information(self, "CUDA download removed", "Restart Clipivo to go back to the CPU.")
+            self.refresh()
+            return
+        self.gpu_button.setEnabled(False)
+        self.gpu_button.setText("Looking it up…")
+        QApplication.processEvents()
+        try:
+            plan = downloads.gpu_pack_plan()
+        except downloads.DownloadError as exc:
+            QMessageBox.warning(self, "GPU acceleration", str(exc))
+            return
+        finally:
+            self.gpu_button.setEnabled(True)
+            self.refresh()
+        item = DownloadItem(
+            "ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
+            lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled),
+            downloads.gpu_dir(), [entry.urls[0] for entry in plan],
+        )
+        dialog = DownloadDialog(
+            "Use the NVIDIA GPU", "Clipivo downloads these from PyPI and keeps them in its own folder:", [item], self,
+            note="Your NVIDIA driver must support CUDA 13. If it does not, Clipivo keeps using the CPU.",
+        )
+        if dialog.exec():
+            QMessageBox.information(self, "GPU acceleration ready", "Restart Clipivo to use your NVIDIA GPU.")
+        self.refresh()
 
 
 class SetupDialog(QDialog):

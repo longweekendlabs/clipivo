@@ -2,26 +2,25 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
+    QFrame,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
-from core import downloads
 from core.face_engine import FaceEngine
 from version import __app_name__, __org_name__, __tagline__, __version__
 
-from .setup_dialog import ComponentsPanel, DownloadDialog, DownloadItem
+from .setup_dialog import ComponentsPanel
 from .styles import PALETTE
 
 
@@ -35,7 +34,17 @@ class SettingsPage(QWidget):
         super().__init__(parent)
         self.face_engine = face_engine
         self.settings = QSettings()
-        root = QVBoxLayout(self)
+        # The page scrolls: a short window must not squash every row to a sliver.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content.setObjectName("root")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        root = QVBoxLayout(content)
         root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(8)
 
@@ -78,30 +87,6 @@ class SettingsPage(QWidget):
         threshold_layout.addWidget(self.threshold_value)
         form.addRow("Match strictness", threshold_row)
 
-        self.engine_status = QLabel()
-        self.engine_status.setWordWrap(True)
-        self.engine_status.setObjectName("engineStatus")
-        self.engine_status.setToolTip("Current ONNX Runtime device and model availability")
-        refresh = QPushButton("Refresh engine status")
-        refresh.setToolTip("Check ONNX Runtime providers and Clipivo model files again")
-        refresh.clicked.connect(self.refresh_engine_status)
-        status_row = QHBoxLayout()
-        status_row.addWidget(self.engine_status, 1)
-        status_row.addWidget(refresh)
-        form.addRow("Status", status_row)
-
-        # Linux packages carry the CPU build of ONNX Runtime; NVIDIA users can add CUDA.
-        self.gpu_pack_label = QLabel()
-        self.gpu_pack_label.setWordWrap(True)
-        self.gpu_pack_button = QPushButton()
-        self.gpu_pack_button.clicked.connect(self._gpu_pack_clicked)
-        gpu_row = QHBoxLayout()
-        gpu_row.addWidget(self.gpu_pack_label, 1)
-        gpu_row.addWidget(self.gpu_pack_button)
-        self.gpu_pack_row = QWidget()
-        self.gpu_pack_row.setLayout(gpu_row)
-        form.addRow("NVIDIA GPU", self.gpu_pack_row)
-        self._refresh_gpu_pack()
         root.addWidget(recognition)
 
         components = QGroupBox("What Clipivo uses")
@@ -176,8 +161,8 @@ class SettingsPage(QWidget):
         privacy_text = QLabel(
             "Saved people's photos are AES-256-GCM encrypted with a Clipivo-only key held by the OS keyring. "
             "One-time photos stay in memory and are gone when Clipivo closes.\n\n"
-            "InsightFace buffalo_l is suitable for this private development build, but its model "
-            "licensing must be resolved before public or commercial distribution."
+            "The face models are InsightFace's buffalo_l pack, published by InsightFace for "
+            "non-commercial research use. Clipivo itself is MIT licensed; the models keep InsightFace's terms."
         )
         privacy_text.setWordWrap(True)
         privacy_text.setStyleSheet(f"color: {PALETTE['muted']};")
@@ -250,60 +235,11 @@ class SettingsPage(QWidget):
         self.settings.setValue("export/video_encoder", value)
         self.exportSettingsChanged.emit(value)
 
-    def _refresh_gpu_pack(self) -> None:
-        installed = downloads.gpu_pack_installed()
-        offered = installed or downloads.gpu_pack_offered()
-        self.gpu_pack_row.setVisible(offered)
-        if installed:
-            self.gpu_pack_label.setText("GPU acceleration is downloaded. It is used from the next start.")
-            self.gpu_pack_button.setText("Remove")
-        else:
-            self.gpu_pack_label.setText(
-                "Scans and following a person run several times faster on your NVIDIA card with "
-                "NVIDIA's CUDA libraries, a one-time download of about 1.5 GB."
-            )
-            self.gpu_pack_button.setText("Download…")
-
-    def _gpu_pack_clicked(self) -> None:
-        if downloads.gpu_pack_installed():
-            downloads.remove_gpu_pack()
-            QMessageBox.information(self, "GPU acceleration removed", "Restart Clipivo to go back to the CPU.")
-            self._refresh_gpu_pack()
-            return
-        self.gpu_pack_button.setEnabled(False)
-        self.gpu_pack_label.setText("Looking up the files on PyPI…")
-        QApplication.processEvents()
-        try:
-            plan = downloads.gpu_pack_plan()
-        except downloads.DownloadError as exc:
-            self.gpu_pack_button.setEnabled(True)
-            self.gpu_pack_label.setText(str(exc))
-            return
-        finally:
-            self.gpu_pack_button.setEnabled(True)
-        item = DownloadItem(
-            "ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
-            lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled),
-            downloads.gpu_dir(), [entry.urls[0] for entry in plan],
-        )
-        dialog = DownloadDialog(
-            "GPU acceleration", "Clipivo downloads these from PyPI and keeps them in its own folder:", [item], self,
-            note="Your NVIDIA driver must support CUDA 13. If it does not, Clipivo keeps using the CPU.",
-        )
-        if dialog.exec():
-            QMessageBox.information(self, "GPU acceleration ready", "Restart Clipivo to use your NVIDIA GPU.")
-        self._refresh_gpu_pack()
-
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if hasattr(self, "components") and not self.components.box.busy():
             self.components.refresh()
 
     def refresh_engine_status(self) -> None:
-        if not self.face_engine:
-            self.engine_status.setText("Unavailable · recognition dependencies are not configured")
-            return
-        status = self.face_engine.status()
-        color = PALETTE["ready"] if status.available else PALETTE["accent"]
-        self.engine_status.setStyleSheet(f"color: {color};")
-        self.engine_status.setText(f"{status.device} · {status.detail}")
+        if hasattr(self, "components") and not self.components.box.busy():
+            self.components.refresh()
