@@ -122,25 +122,141 @@ def face_model_dir() -> Path:
     return data_dir() / "models" / "buffalo_l"
 
 
+def _app_folders() -> list[Path]:
+    """Every per-user and installed application folder on this computer: where other apps,
+    including other Long Weekend Labs apps, keep the same model pack."""
+    home = Path.home()
+    if sys.platform == "win32":
+        local = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        roots = [
+            local, Path(os.environ.get("APPDATA", home / "AppData" / "Roaming")), local / "Programs",
+            Path(os.environ.get("PROGRAMFILES", "C:/Program Files")),
+            Path(os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")),
+        ]
+    elif sys.platform == "darwin":
+        roots = [home / "Library" / "Application Support", Path("/Applications"), home / "Applications"]
+    else:
+        roots = [
+            Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share")),
+            Path("/opt"), Path("/usr/share"), Path("/usr/local/share"),
+        ]
+    folders: list[Path] = []
+    for root in roots:
+        try:
+            folders.extend(sorted(child for child in root.iterdir() if child.is_dir()))
+        except OSError:
+            continue
+    return folders
+
+
+# Where an app keeps the pack inside its own folder: a data folder, a PyInstaller build,
+# a macOS bundle.
+_PACK_PLACES = (
+    "models/buffalo_l",
+    "_internal/models/buffalo_l",
+    "Contents/Resources/models/buffalo_l",
+    "Contents/Frameworks/models/buffalo_l",
+)
+
+
 def _face_model_candidates() -> list[Path]:
-    """Folders where the pack may already be, read-only, before downloading another copy."""
+    """Folders where the pack may already be, read-only, before downloading another copy:
+    Clipivo's own, insightface's cache, then every other application's folder."""
     candidates = [face_model_dir(), APP_DIR / "models" / "buffalo_l", Path.home() / ".insightface" / "models" / "buffalo_l"]
     shared = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     candidates.append(shared / "long-weekend-labs" / "models" / "buffalo_l")
+    for folder in _app_folders():
+        candidates.extend(folder / place for place in _PACK_PLACES)
     try:
-        # A source checkout next to other Long Weekend Labs projects (Castivo uses the same pack).
+        # Running from a source checkout beside other projects that use the same pack.
         candidates.extend(sorted(APP_DIR.parent.glob("*/models/buffalo_l")))
     except OSError:
         pass
-    return candidates
+    unique: list[Path] = []
+    for folder in candidates:
+        if folder not in unique:
+            unique.append(folder)
+    return unique
+
+
+def _verified_cache() -> Path:
+    return data_dir() / "verified-files.json"
+
+
+def _is_verified(path: Path, item: RemoteFile, cache: dict) -> bool:
+    """The right size, and its checksum confirmed once: the result is remembered by size and
+    modification time, so a copy found elsewhere is not hashed again on every start."""
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    if info.st_size != item.size:
+        return False
+    stamp = [info.st_size, info.st_mtime_ns]
+    if cache.get(str(path)) == stamp:
+        return True
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != item.sha256:
+        return False
+    cache[str(path)] = stamp
+    return True
+
+
+_FOUND: dict[str, Path | None] = {}
+
+
+def forget_found() -> None:
+    """Search again next time, after a download or when the user asks."""
+    _FOUND.clear()
 
 
 def find_face_models() -> Path | None:
-    """The folder holding both model files, complete, or None."""
+    """The folder holding both model files, complete and checked, or None. Remembered for
+    the session, since every application folder is searched."""
+    if "face" in _FOUND and (_FOUND["face"] is None or _FOUND["face"].is_dir()):
+        return _FOUND["face"]
+    _FOUND["face"] = _search_face_models()
+    return _FOUND["face"]
+
+
+def _search_face_models() -> Path | None:
+    try:
+        cache = json.loads(_verified_cache().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    before = dict(cache)
+    found = None
     for folder in _face_model_candidates():
-        if all((folder / item.name).is_file() and (folder / item.name).stat().st_size == item.size for item in FACE_MODEL_FILES):
-            return folder
-    return None
+        if all((folder / item.name).is_file() for item in FACE_MODEL_FILES) and all(
+            _is_verified(folder / item.name, item, cache) for item in FACE_MODEL_FILES
+        ):
+            found = folder
+            break
+    if cache != before:
+        try:
+            _verified_cache().parent.mkdir(parents=True, exist_ok=True)
+            _verified_cache().write_text(json.dumps(cache, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+    return found
+
+
+def describe_location(folder: Path) -> str:
+    """Where a found copy came from, in words."""
+    if folder == face_model_dir():
+        return "downloaded by Clipivo"
+    if ".insightface" in folder.parts:
+        return "InsightFace's own cache"
+    if folder == APP_DIR / "models" / "buffalo_l":
+        return "beside Clipivo"
+    for root_part in ("_internal", "Contents", "models"):
+        if root_part in folder.parts:
+            owner = folder.parts[folder.parts.index(root_part) - 1]
+            return f"shared with {owner}"
+    return "found on this computer"
 
 
 def face_models_download_size() -> int:
@@ -148,6 +264,7 @@ def face_models_download_size() -> int:
 
 
 def download_face_models(progress: ProgressFn | None = None, cancelled: CancelledFn | None = None) -> Path:
+    forget_found()
     existing = find_face_models()
     if existing:
         return existing
@@ -166,6 +283,7 @@ def download_face_models(progress: ProgressFn | None = None, cancelled: Cancelle
             _face_models_from_archive(target, progress, cancelled)
         except DownloadError:
             raise first_error
+    forget_found()
     return target
 
 

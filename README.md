@@ -76,7 +76,7 @@ Open or drop an MP4, MKV, WebM, MOV, AVI or M4V and it appears at once. Playback
 
 Windows, Linux x86_64 and macOS Apple Silicon builds are on the [releases page](https://github.com/longweekendlabs/clipivo/releases/latest): a per-user Windows installer that never asks for administrator rights, a portable zip, rpm, deb and a tarball for Linux, and a dmg for macOS 14 or newer.
 
-The installers stay small. On first launch Clipivo downloads the face models once (191 MB), and on Windows and macOS also ffmpeg. Playback uses VLC: the Linux packages install it, and on Windows and macOS Clipivo points you to it if it is missing. Face matching uses your graphics card through DirectML on Windows and Core ML on macOS; on Linux with an NVIDIA card, Settings offers NVIDIA's CUDA libraries as an optional download.
+The installers stay small. On first launch Clipivo looks for the face models on your computer, for example a copy another app already downloaded, and downloads them only if none is found (191 MB); on Windows and macOS it does the same for ffmpeg. Settings shows what it found and where. Playback uses VLC: the Linux packages install it, and on Windows and macOS Clipivo points you to it if it is missing. Face matching uses your graphics card through DirectML on Windows and Core ML on macOS; on Linux with an NVIDIA card, Settings offers NVIDIA's CUDA libraries as an optional download.
 
 ## Feedback
 

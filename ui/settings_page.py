@@ -21,7 +21,7 @@ from core import downloads
 from core.face_engine import FaceEngine
 from version import __app_name__, __org_name__, __tagline__, __version__
 
-from .setup_dialog import DownloadDialog, DownloadItem
+from .setup_dialog import ComponentsPanel, DownloadDialog, DownloadItem
 from .styles import PALETTE
 
 
@@ -31,7 +31,7 @@ class SettingsPage(QWidget):
     defaultFolderChanged = Signal(str)
     aboutRequested = Signal()
 
-    def __init__(self, face_engine: FaceEngine | None, parent=None):
+    def __init__(self, face_engine: FaceEngine | None, parent=None, playback=None):
         super().__init__(parent)
         self.face_engine = face_engine
         self.settings = QSettings()
@@ -103,6 +103,13 @@ class SettingsPage(QWidget):
         form.addRow("NVIDIA GPU", self.gpu_pack_row)
         self._refresh_gpu_pack()
         root.addWidget(recognition)
+
+        components = QGroupBox("What Clipivo uses")
+        components.setToolTip("Face models, ffmpeg, VLC and the face-matching device: found or not, and where")
+        components_layout = QVBoxLayout(components)
+        self.components = ComponentsPanel(face_engine, playback, components)
+        components_layout.addWidget(self.components)
+        root.addWidget(components)
 
         export = QGroupBox("Export performance")
         export.setToolTip("Choose how Exact-cut MP4 video is encoded")
@@ -286,6 +293,11 @@ class SettingsPage(QWidget):
         if dialog.exec():
             QMessageBox.information(self, "GPU acceleration ready", "Restart Clipivo to use your NVIDIA GPU.")
         self._refresh_gpu_pack()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if hasattr(self, "components") and not self.components.box.busy():
+            self.components.refresh()
 
     def refresh_engine_status(self) -> None:
         if not self.face_engine:

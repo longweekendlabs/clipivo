@@ -7,6 +7,8 @@ from time import monotonic
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtWidgets import QApplication, QWidget
 
+from core import vlc_locate
+
 
 class VlcPlaybackController(QObject):
     """Small Qt-facing wrapper around libVLC's Linux playback engine.
@@ -39,6 +41,9 @@ class VlcPlaybackController(QObject):
         self._player = None
         # Why playback is off (VLC not installed), shown once by the main window.
         self.unavailable_reason = ""
+        # The installed VLC in use, for Settings: its library and version.
+        self.vlc_library = ""
+        self.vlc_version = ""
 
         # Unit tests use Qt's offscreen plugin, where no embeddable native
         # surface exists. Keep the same API without starting a media backend.
@@ -58,6 +63,7 @@ class VlcPlaybackController(QObject):
         ]
         if sys.platform.startswith("linux"):
             options.append("--vout=xcb_x11")
+        location = vlc_locate.prepare()
         try:
             import vlc
 
@@ -66,14 +72,14 @@ class VlcPlaybackController(QObject):
             if self._instance is None:
                 raise RuntimeError("libVLC did not start")
             self._player = self._instance.media_player_new()
+            self.vlc_library = str(getattr(getattr(vlc, "dll", None), "_name", "") or location.library or "")
+            self.vlc_version = vlc.libvlc_get_version().decode(errors="replace")
         except Exception as exc:  # noqa: BLE001
             # Clipivo stays usable without VLC: frames, scans and saving use PyAV and ffmpeg.
             self._instance = None
             self._player = None
-            self.unavailable_reason = (
-                "Playback needs VLC, which was not found on this computer. Frame stepping, "
-                f"scanning and saving still work. [{type(exc).__name__}: {exc}]"
-            )
+            found = location.problem or f"VLC was found but did not start. [{type(exc).__name__}: {exc}]"
+            self.unavailable_reason = f"{found} Frame stepping, scanning and saving still work without it."
             self._poll_timer = None
             return
 

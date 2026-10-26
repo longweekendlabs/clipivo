@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-26
+
+### Added
+- Settings has a "What Clipivo uses" section, and the first-launch window shows the same: the face models, ffmpeg, VLC and the face-matching device, each found or not, where it is, which app a shared copy belongs to, its version, and what to do about anything missing. "Look again" searches once more after you install something or copy files in.
+- Face matching says what it runs on: CUDA with the name of the NVIDIA card, DirectML, Core ML or the CPU, and whether CUDA comes from Clipivo's optional download.
+
+### Changed
+- Clipivo looks for the face models before downloading them, in every application folder on the computer: per-user app data and installed programs on Linux, Windows and macOS, inside other apps' bundles too. A copy another app already downloaded is checked once against its published checksum and then used, so the same 191 MB is not downloaded again.
+- Clipivo finds the installed VLC itself: Program Files, per-user installs and the location VLC records on Windows, VLC.app in either Applications folder on macOS, the system library on Linux. Clipivo never downloads or installs VLC. It says when the VLC it found cannot be used: a 32-bit VLC on Windows, or a Flatpak-only VLC on Linux.
+
+
 ## [0.7.3] - 2026-10-26
 
 The first build for Windows and macOS, and the first public release. 0.7.1 and 0.7.2 were tagged but never published: their Linux builds stopped on the problems fixed below.

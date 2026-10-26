@@ -27,7 +27,7 @@ from core.downloads import APP_DIR, ffmpeg_available  # noqa: E402
 from core.export import clean_stale_work  # noqa: E402
 from core.face_engine import InsightFaceEngine  # noqa: E402
 from ui.main_window import MainWindow  # noqa: E402
-from ui.setup_dialog import ffmpeg_missing_message, offer_downloads, open_vlc_page  # noqa: E402
+from ui.setup_dialog import ffmpeg_missing_message, missing_downloads, offer_downloads, open_vlc_page  # noqa: E402
 from version import __app_name__, __org_name__, __version__  # noqa: E402
 
 
@@ -36,8 +36,11 @@ PROJECT_DIR = APP_DIR
 
 
 def first_launch_checks(window: MainWindow) -> None:
-    """Fetch the face models (and ffmpeg where needed) once, and say if VLC or ffmpeg is missing."""
-    offer_downloads(window)
+    """Show what Clipivo found and fetch what is missing (the face models, ffmpeg where needed).
+    The setup window lists VLC and ffmpeg too; without it, say if either is missing."""
+    if missing_downloads():
+        offer_downloads(window, window.face_engine, window.playback_info)
+        return
     if not ffmpeg_available():
         QMessageBox.warning(window, "ffmpeg is missing", ffmpeg_missing_message())
     reason = window.playback_unavailable_reason()
@@ -79,6 +82,10 @@ def self_test() -> int:
     except Exception as exc:  # noqa: BLE001
         failures.append(f"onnxruntime: {exc}")
     try:
+        from core import vlc_locate
+
+        location = vlc_locate.prepare()
+        report["vlc_search"] = str(location.library) if location.usable else location.problem
         import vlc
 
         report["vlc_library"] = getattr(getattr(vlc, "dll", None), "_name", "")

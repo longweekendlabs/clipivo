@@ -560,7 +560,7 @@ class MainWindow(QMainWindow):
         self.batch_page.set_match_threshold(self.people_page.match_threshold)
         self.pages.addWidget(self.batch_page)
         self.pages.addWidget(self.people_page)
-        self.settings_page = SettingsPage(self.face_engine)
+        self.settings_page = SettingsPage(self.face_engine, playback=self.playback_info)
         self.settings_page.faceSettingsChanged.connect(self._face_settings_changed)
         self.settings_page.exportSettingsChanged.connect(self._export_settings_changed)
         self.settings_page.defaultFolderChanged.connect(self._default_folder_changed)
@@ -1488,8 +1488,14 @@ class MainWindow(QMainWindow):
     def playback_unavailable_reason(self) -> str:
         return getattr(self.player, "unavailable_reason", "")
 
+    def playback_info(self) -> tuple[str, str, str]:
+        """(VLC library, VLC version, why playback is off) for the Components panel."""
+        player = getattr(self, "player", None)
+        return (getattr(player, "vlc_library", ""), getattr(player, "vlc_version", ""),
+                getattr(player, "unavailable_reason", ""))
+
     def _start_video_job(self) -> None:
-        if not offer_downloads(self):
+        if not offer_downloads(self, self.face_engine, self.playback_info):
             return
         person = self._current_person()
         if not self.video_info:

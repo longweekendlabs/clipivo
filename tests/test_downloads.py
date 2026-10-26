@@ -46,19 +46,44 @@ class DownloadTests(unittest.TestCase):
             downloads._fetch(url, target, 3_000_000, digest, 0, 3_000_000, None, lambda: True, "Big")
         self.assertEqual(list(self.root.glob("big.bin*")), [])
 
+    def _fake_pack(self, folder: Path) -> tuple:
+        folder.mkdir(parents=True)
+        (folder / "det_10g.onnx").write_bytes(b"abc")
+        (folder / "w600k_r50.onnx").write_bytes(b"abcd")
+        return (
+            downloads.RemoteFile("det_10g.onnx", 3, hashlib.sha256(b"abc").hexdigest(), ()),
+            downloads.RemoteFile("w600k_r50.onnx", 4, hashlib.sha256(b"abcd").hexdigest(), ()),
+        )
+
     def test_existing_face_models_are_found_instead_of_downloaded(self) -> None:
         folder = self.root / "shared" / "buffalo_l"
-        folder.mkdir(parents=True)
-        fake = (
-            downloads.RemoteFile("det_10g.onnx", 3, "", ()),
-            downloads.RemoteFile("w600k_r50.onnx", 4, "", ()),
-        )
-        (folder / "det_10g.onnx").write_bytes(b"abc")
+        fake = self._fake_pack(folder)
         (folder / "w600k_r50.onnx").write_bytes(b"ab")  # incomplete
-        with patch.object(downloads, "FACE_MODEL_FILES", fake), patch.object(downloads, "_face_model_candidates", return_value=[folder]):
+        with patch.object(downloads, "FACE_MODEL_FILES", fake), patch.object(downloads, "_face_model_candidates", return_value=[folder]), \
+                patch.object(downloads, "data_dir", return_value=self.root / "data"):
+            downloads.forget_found()
             self.assertIsNone(downloads.find_face_models())
             (folder / "w600k_r50.onnx").write_bytes(b"abcd")
+            downloads.forget_found()
             self.assertEqual(downloads.find_face_models(), folder)
+            (folder / "w600k_r50.onnx").write_bytes(b"abce")  # right size, wrong content
+            downloads.forget_found()
+            self.assertIsNone(downloads.find_face_models())
+        downloads.forget_found()
+
+    def test_a_copy_inside_another_apps_folder_is_used(self) -> None:
+        other_app = self.root / "apps" / "someapp"
+        fake = self._fake_pack(other_app / "_internal" / "models" / "buffalo_l")
+        with patch.object(downloads, "FACE_MODEL_FILES", fake), patch.object(downloads, "_app_folders", return_value=[other_app]), \
+                patch.object(downloads, "data_dir", return_value=self.root / "data"), \
+                patch.object(downloads, "APP_DIR", self.root / "clipivo" / "_internal"), \
+                patch.dict("os.environ", {"XDG_DATA_HOME": str(self.root / "xdg")}), \
+                patch("pathlib.Path.home", return_value=self.root / "home"):
+            downloads.forget_found()
+            found = downloads.find_face_models()
+            self.assertEqual(found, other_app / "_internal" / "models" / "buffalo_l")
+            self.assertEqual(downloads.describe_location(found), "shared with someapp")
+        downloads.forget_found()
 
     def test_ffmpeg_comes_out_of_its_archive(self) -> None:
         archive = self.root / "source" / "ff.zip"
