@@ -6,6 +6,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .models import StreamInfo, VideoInfo
+from .downloads import tool_path
 
 
 class ProbeError(RuntimeError):
@@ -13,7 +14,7 @@ class ProbeError(RuntimeError):
 
 
 def _run_ffprobe(args: list[str]) -> str:
-    command = ["ffprobe", "-v", "error", *args]
+    command = [tool_path("ffprobe"), "-v", "error", *args]
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
     except FileNotFoundError as exc:

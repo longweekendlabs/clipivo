@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from time import monotonic
 
@@ -36,6 +37,8 @@ class VlcPlaybackController(QObject):
         self._muted = False
         self._instance = None
         self._player = None
+        # Why playback is off (VLC not installed), shown once by the main window.
+        self.unavailable_reason = ""
 
         # Unit tests use Qt's offscreen plugin, where no embeddable native
         # surface exists. Keep the same API without starting a media backend.
@@ -43,27 +46,36 @@ class VlcPlaybackController(QObject):
             self._poll_timer = None
             return
 
+        options = [
+            "--quiet",
+            "--verbose=-1",
+            "--no-video-title-show",
+            "--no-osd",
+            "--no-stats",
+            "--codec=dav1d,avcodec",
+            "--avcodec-hw=none",
+            "--file-caching=300",
+        ]
+        if sys.platform.startswith("linux"):
+            options.append("--vout=xcb_x11")
         try:
             import vlc
 
             self._vlc = vlc
-            self._instance = vlc.Instance(
-                "--quiet",
-                "--verbose=-1",
-                "--no-video-title-show",
-                "--no-osd",
-                "--no-stats",
-                "--codec=dav1d,avcodec",
-                "--avcodec-hw=none",
-                "--file-caching=300",
-                "--vout=xcb_x11",
-            )
+            self._instance = vlc.Instance(*options)
+            if self._instance is None:
+                raise RuntimeError("libVLC did not start")
             self._player = self._instance.media_player_new()
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                "Clipivo's Linux player could not start. Install VLC and the python-vlc package. "
-                f"[{type(exc).__name__}: {exc}]"
-            ) from exc
+            # Clipivo stays usable without VLC: frames, scans and saving use PyAV and ffmpeg.
+            self._instance = None
+            self._player = None
+            self.unavailable_reason = (
+                "Playback needs VLC, which was not found on this computer. Frame stepping, "
+                f"scanning and saving still work. [{type(exc).__name__}: {exc}]"
+            )
+            self._poll_timer = None
+            return
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(25)
@@ -76,8 +88,13 @@ class VlcPlaybackController(QObject):
             return
         surface.setAttribute(Qt.WA_NativeWindow, True)
         surface.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        surface.winId()
-        self._player.set_xwindow(int(surface.winId()))
+        handle = int(surface.winId())
+        if sys.platform == "win32":
+            self._player.set_hwnd(handle)
+        elif sys.platform == "darwin":
+            self._player.set_nsobject(handle)
+        else:
+            self._player.set_xwindow(handle)
         self._player.video_set_mouse_input(False)
         self._player.video_set_key_input(False)
 

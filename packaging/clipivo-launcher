@@ -1,8 +1,0 @@
-#!/usr/bin/bash
-set -euo pipefail
-
-if [[ -n "${DISPLAY:-}" ]]; then
-    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
-fi
-
-exec /opt/clipivo/.venv/bin/python /opt/clipivo/app.py "$@"

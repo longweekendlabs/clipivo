@@ -13,6 +13,9 @@ exports/
 # Build and packaging artifacts
 build/
 dist/
+release/
+assets/icons/clipivo.icns
+self-test.json
 rpm-build/
 packaging/rpmbuild/
 packaging/.rpm-stage.*/

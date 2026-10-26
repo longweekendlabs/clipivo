@@ -46,6 +46,7 @@ from core.models import ClipRange
 from core.timecode import format_duration, format_remaining
 from core.video_probe import probe_video
 
+from .setup_dialog import offer_downloads
 from .job_panel import JobPanel, OneTimePerson
 from .native_dialogs import choose_directory, choose_videos
 
@@ -655,6 +656,8 @@ class BatchPage(QWidget):
 
     def _start(self) -> None:
         if self.is_running():
+            return
+        if not offer_downloads(self):
             return
         if self.busy_elsewhere():
             QMessageBox.information(self, "Clipivo is busy", "Wait for the Video tab job to finish, or cancel it, first.")

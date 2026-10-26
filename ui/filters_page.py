@@ -43,6 +43,7 @@ from core.timecode import format_timecode
 from .icons import line_icon
 from .styles import PALETTE
 from .timeline import DetectionTimeline
+from core.downloads import tool_path
 
 
 class FilterPreviewCanvas(QWidget):
@@ -670,7 +671,7 @@ class FilterConfigDialog(QDialog):
             output_arguments.extend(("-vf", output_graph))
         output_arguments.extend(("-f", "image2pipe", "-vcodec", "png", "pipe:1"))
         process.finished.connect(lambda _code, _status, owner=process: self._preview_finished(owner))
-        process.start("ffmpeg", output_arguments)
+        process.start(tool_path("ffmpeg"), output_arguments)
 
         if not (self.candidate and self.candidate.kind == "crop"):
             original_filters = self.prefix_filters if self.candidate else []
@@ -687,7 +688,7 @@ class FilterConfigDialog(QDialog):
             original_process.finished.connect(
                 lambda _code, _status, owner=original_process: self._original_preview_finished(owner)
             )
-            original_process.start("ffmpeg", original_arguments)
+            original_process.start(tool_path("ffmpeg"), original_arguments)
 
     def _preview_finished(self, process: QProcess) -> None:
         if process is not self._preview_process:
@@ -820,12 +821,12 @@ class FilterConfigDialog(QDialog):
             self._original_play_process = original_process
             original_process.readyReadStandardOutput.connect(self._read_original_playback_frames)
             original_process.finished.connect(self._original_playback_finished)
-            original_process.start("ffmpeg", original_arguments)
+            original_process.start(tool_path("ffmpeg"), original_arguments)
         self.play_button.setText("Ⅱ Pause")
         self.play_ab_button.setText("Ⅱ Pause A–B" if selection_only else "▶ Play A–B")
         self.previous_button.setEnabled(False)
         self.next_button.setEnabled(False)
-        process.start("ffmpeg", arguments)
+        process.start(tool_path("ffmpeg"), arguments)
 
     def _read_playback_frames(self) -> None:
         process = self._play_process
@@ -1611,7 +1612,7 @@ class FiltersPage(QWidget):
             "-f", "image2pipe", "-vcodec", "png", "pipe:1",
         ]
         process.finished.connect(lambda _code, _status, owner=process: self._preview_finished(owner))
-        process.start("ffmpeg", arguments)
+        process.start(tool_path("ffmpeg"), arguments)
 
     def _preview_finished(self, process: QProcess) -> None:
         if process is not self._preview_process:

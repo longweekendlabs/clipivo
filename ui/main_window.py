@@ -59,6 +59,7 @@ from core.export import OutputShape, snap_to_keyframes
 from core.naming import output_base_name
 from .icons import line_icon
 from .job_panel import OneTimePerson
+from .setup_dialog import offer_downloads
 from .filters_page import FiltersPage
 from .native_dialogs import choose_directory, choose_png_file, choose_save_file, choose_video
 from .people_page import PeoplePage
@@ -1484,7 +1485,12 @@ class MainWindow(QMainWindow):
             self.wide_face_engine = factory() if callable(factory) else self.face_engine
         return self.wide_face_engine
 
+    def playback_unavailable_reason(self) -> str:
+        return getattr(self.player, "unavailable_reason", "")
+
     def _start_video_job(self) -> None:
+        if not offer_downloads(self):
+            return
         person = self._current_person()
         if not self.video_info:
             QMessageBox.information(self, "Open a video", "Open a video first, then press Start.")

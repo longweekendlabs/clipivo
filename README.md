@@ -2,7 +2,13 @@
 
 **Find the moments that matter.**
 
+[![GitHub Release](https://img.shields.io/github/v/release/longweekendlabs/clipivo?style=flat-square)](https://github.com/longweekendlabs/clipivo/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Windows, Linux, macOS](https://img.shields.io/badge/Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat-square)](#download)
+
 Clipivo cuts every appearance of one person out of your videos, automatically. Give it a few photos of the person, press Start, and it scans the whole video, finds every time they are on screen and saves those moments as one stitched video or as separate clips. An hour-long broadcast becomes the few minutes you actually wanted. It also works as a plain, precise manual cutter. Everything runs on your own machine.
+
+### [Download for Windows, Linux and macOS](https://github.com/longweekendlabs/clipivo/releases/latest)
 
 ## Pick who, pick how, press Start
 
@@ -66,9 +72,11 @@ Crop gives you a shaded on-picture selection with draggable edges and corners, g
 
 Open or drop an MP4, MKV, WebM, MOV, AVI or M4V and it appears at once. Playback runs through libVLC, so anything VLC can decode plays here. Seek by timeline, frame or keyframe. Press `A` at the start, `B` at the end, `Ctrl+Enter` to add the range, and save. `Ctrl+P` saves the current frame as a PNG and `Ctrl+W` closes the video.
 
-## Status
+## Download
 
-Fedora Linux. No public release yet. Private build for personal use. Not for distribution.
+Windows, Linux x86_64 and macOS Apple Silicon builds are on the [releases page](https://github.com/longweekendlabs/clipivo/releases/latest): a per-user Windows installer that never asks for administrator rights, a portable zip, rpm, deb and a tarball for Linux, and a dmg for macOS 14 or newer.
+
+The installers stay small. On first launch Clipivo downloads the face models once (191 MB), and on Windows and macOS also ffmpeg. Playback uses VLC: the Linux packages install it, and on Windows and macOS Clipivo points you to it if it is missing. Face matching uses your graphics card through DirectML on Windows and Core ML on macOS; on Linux with an NVIDIA card, Settings offers NVIDIA's CUDA libraries as an optional download.
 
 ## Feedback
 
@@ -76,7 +84,9 @@ Fedora Linux. No public release yet. Private build for personal use. Not for dis
 
 ## License
 
-All rights reserved. See [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). No licence key, no trial, no subscription.
+
+The face models Clipivo downloads are InsightFace's buffalo_l pack, published by InsightFace for non-commercial research use, and stay under InsightFace's terms.
 
 © 2026 Long Weekend Labs
 

@@ -19,6 +19,7 @@ from .framing import canvas_size, crop_filter, fit_filter, framed_shots, scale_f
 from .models import ClipRange
 from .timecode import ffmpeg_time
 from .video_probe import ProbeError, probe_video
+from .downloads import tool_path
 
 
 class ExportError(RuntimeError):
@@ -101,7 +102,7 @@ def cover_stream_index(source: Path) -> int | None:
     """Index of an embedded cover picture (a YouTube download's thumbnail), if the file has one."""
     try:
         completed = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
+            [tool_path("ffprobe"), "-v", "error", "-select_streams", "v", "-show_entries",
              "stream=index:stream_disposition=attached_pic", "-of", "csv=p=0", str(source)],
             capture_output=True, text=True, timeout=30, check=False,
         )
@@ -125,7 +126,7 @@ def extract_cover(source: Path, max_width: int = 0) -> Path | None:
     if target.is_file():
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    command = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(source), "-map", f"0:{index}", "-frames:v", "1"]
+    command = [tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-i", str(source), "-map", f"0:{index}", "-frames:v", "1"]
     if max_width:
         command += ["-vf", f"scale='min({max_width},iw)':-2"]
     try:
@@ -140,7 +141,7 @@ def embed_cover(output: Path, cover: Path, logs: list[str] | None = None) -> boo
     Never fatal: the output is kept as it is if this fails."""
     temporary = output.with_name(f".{output.stem}.cover{output.suffix}")
     command = [
-        "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(output), "-i", str(cover),
+        tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-i", str(output), "-i", str(cover),
         "-map", "0", "-map", "1", "-c", "copy", "-disposition:v:1", "attached_pic",
         "-movflags", "+faststart", str(temporary),
     ]
@@ -433,7 +434,7 @@ def _export_stitched(
         )
         progress(len(ranges) * 1000, total_units, "Joining segments")
         command = [
-            "ffmpeg", "-hide_banner", "-y", "-fflags", "+genpts",
+            tool_path("ffmpeg"), "-hide_banner", "-y", "-fflags", "+genpts",
             "-f", "concat", "-safe", "0", "-i", str(concat_file),
             "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(target),
         ]
@@ -470,7 +471,7 @@ def _export_one(
     if mode == "copy":
         # Seek 1 ms past the snapped keyframe so rounding never selects the previous one.
         command = [
-            "ffmpeg", "-hide_banner", "-y",
+            tool_path("ffmpeg"), "-hide_banner", "-y",
             "-ss", ffmpeg_time(clip.start_ms + 1), "-i", str(source),
             "-t", ffmpeg_time(duration),
             "-map", "0:v:0",
@@ -480,7 +481,7 @@ def _export_one(
         command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(target)])
     elif mode == "accurate":
         command = [
-            "ffmpeg", "-hide_banner", "-y",
+            tool_path("ffmpeg"), "-hide_banner", "-y",
             "-ss", ffmpeg_time(clip.start_ms), "-t", ffmpeg_time(duration),
             "-i", str(source),
             "-map", "0:v:0",
@@ -585,7 +586,7 @@ def _run(
 def nvenc_available() -> bool:
     try:
         completed = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [tool_path("ffmpeg"), "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -684,7 +685,7 @@ def keyframe_at_or_before(source: Path, milliseconds: int) -> int:
     window_start = max(0.0, milliseconds / 1000 - 20)
     completed = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+            tool_path("ffprobe"), "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
             "-read_intervals", f"{window_start:.3f}%{milliseconds / 1000 + 0.05:.3f}",
             "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(source),
         ],

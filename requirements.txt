@@ -1,9 +1,20 @@
-PySide6>=6.8,<7
-av>=14,<17
-numpy>=1.26,<3
-cryptography>=49,<50
-keyring>=25.7,<26
-opencv-python-headless>=5,<6
-insightface>=1.0,<2
-onnxruntime-gpu>=1.22,<2
-python-vlc>=3.0.21203,<4
+# Clipivo runtime. Builds install exactly this into a fresh environment, so nothing a
+# development machine happens to have (onnxruntime-gpu, CUDA, insightface) is ever bundled.
+
+# Only QtCore, QtGui, QtWidgets and QtSvg are used: Essentials, not the 400 MB of add-ons.
+PySide6-Essentials==6.11.1
+av==16.1.0
+numpy==2.4.6
+opencv-python-headless==5.0.0.93
+cryptography==49.0.0
+keyring==25.7.0
+python-vlc==3.0.21203
+# Certificate bundle for downloads from a packaged build (see core/downloads.py).
+certifi==2026.7.22
+
+# Face detection and recognition. Windows uses DirectML (any GPU); macOS includes Core ML.
+# Linux ships the CPU build; NVIDIA users can download the CUDA build from Settings.
+onnxruntime==1.31.0; sys_platform != "win32"
+onnxruntime-directml==1.24.4; sys_platform == "win32"
+
+# Development on an NVIDIA machine (not bundled): pip install onnxruntime-gpu==1.31.0

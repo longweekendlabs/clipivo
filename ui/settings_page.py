@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSettings, Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -9,15 +10,18 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
 
+from core import downloads
 from core.face_engine import FaceEngine
 from version import __app_name__, __org_name__, __tagline__, __version__
 
+from .setup_dialog import DownloadDialog
 from .styles import PALETTE
 
 
@@ -47,9 +51,9 @@ class SettingsPage(QWidget):
         recognition = QGroupBox("Local face engine")
         recognition.setToolTip("Configure InsightFace detection and matching")
         form = QFormLayout(recognition)
-        self.gpu = QCheckBox("Prefer NVIDIA GPU when available")
+        self.gpu = QCheckBox("Use the GPU when available")
         self.gpu.setChecked(self.settings.value("face/use_gpu", True, bool))
-        self.gpu.setToolTip("Use CUDAExecutionProvider when available; otherwise fall back to CPU")
+        self.gpu.setToolTip("CUDA on NVIDIA, DirectML on Windows, Core ML on macOS; otherwise the CPU")
         form.addRow("Device", self.gpu)
 
         self.detector = QComboBox()
@@ -85,6 +89,19 @@ class SettingsPage(QWidget):
         status_row.addWidget(self.engine_status, 1)
         status_row.addWidget(refresh)
         form.addRow("Status", status_row)
+
+        # Linux packages carry the CPU build of ONNX Runtime; NVIDIA users can add CUDA.
+        self.gpu_pack_label = QLabel()
+        self.gpu_pack_label.setWordWrap(True)
+        self.gpu_pack_button = QPushButton()
+        self.gpu_pack_button.clicked.connect(self._gpu_pack_clicked)
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(self.gpu_pack_label, 1)
+        gpu_row.addWidget(self.gpu_pack_button)
+        self.gpu_pack_row = QWidget()
+        self.gpu_pack_row.setLayout(gpu_row)
+        form.addRow("NVIDIA GPU", self.gpu_pack_row)
+        self._refresh_gpu_pack()
         root.addWidget(recognition)
 
         export = QGroupBox("Export performance")
@@ -225,6 +242,47 @@ class SettingsPage(QWidget):
         value = self.export_encoder_value()
         self.settings.setValue("export/video_encoder", value)
         self.exportSettingsChanged.emit(value)
+
+    def _refresh_gpu_pack(self) -> None:
+        installed = downloads.gpu_pack_installed()
+        offered = installed or downloads.gpu_pack_offered()
+        self.gpu_pack_row.setVisible(offered)
+        if installed:
+            self.gpu_pack_label.setText("GPU acceleration is downloaded. It is used from the next start.")
+            self.gpu_pack_button.setText("Remove")
+        else:
+            self.gpu_pack_label.setText(
+                "Scans and following a person run several times faster on your NVIDIA card with "
+                "NVIDIA's CUDA libraries, a one-time download of about 1.5 GB."
+            )
+            self.gpu_pack_button.setText("Download…")
+
+    def _gpu_pack_clicked(self) -> None:
+        if downloads.gpu_pack_installed():
+            downloads.remove_gpu_pack()
+            QMessageBox.information(self, "GPU acceleration removed", "Restart Clipivo to go back to the CPU.")
+            self._refresh_gpu_pack()
+            return
+        self.gpu_pack_button.setEnabled(False)
+        self.gpu_pack_label.setText("Looking up the files on PyPI…")
+        QApplication.processEvents()
+        try:
+            plan = downloads.gpu_pack_plan()
+        except downloads.DownloadError as exc:
+            self.gpu_pack_button.setEnabled(True)
+            self.gpu_pack_label.setText(str(exc))
+            return
+        finally:
+            self.gpu_pack_button.setEnabled(True)
+        item = ("ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
+                lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled))
+        dialog = DownloadDialog(
+            "GPU acceleration", "Clipivo downloads these from PyPI and keeps them in its own folder:", [item], self,
+            note="Your NVIDIA driver must support CUDA 13. If it does not, Clipivo keeps using the CPU.",
+        )
+        if dialog.exec():
+            QMessageBox.information(self, "GPU acceleration ready", "Restart Clipivo to use your NVIDIA GPU.")
+        self._refresh_gpu_pack()
 
     def refresh_engine_status(self) -> None:
         if not self.face_engine:

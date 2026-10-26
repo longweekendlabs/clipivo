@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout
 
 from version import __app_name__, __copyright__, __org_name__, __repository__ as REPOSITORY_URL, __tagline__, __version__
 from version import __website__ as WEBSITE_URL
+
+from core.downloads import APP_DIR
 
 from .styles import PALETTE
 
@@ -54,14 +56,26 @@ class AboutDialog(QDialog):
         divider.setToolTip("About section divider")
         layout.addWidget(divider)
 
+        chip = QLabel("FREE & OPEN SOURCE · MIT")
+        chip.setAlignment(Qt.AlignHCenter)
+        chip.setStyleSheet(
+            f"color: {PALETTE['accent']}; border: 1px solid {PALETTE['accent']}; border-radius: 4px;"
+            " padding: 2px 8px; font-size: 10px; font-weight: bold;"
+        )
+        chip_row = QHBoxLayout()
+        chip_row.addStretch()
+        chip_row.addWidget(chip)
+        chip_row.addStretch()
+        layout.addLayout(chip_row)
+
         notice = QLabel(
-            "Private development build. The bundled InsightFace buffalo_l model has "
-            "research-use licensing constraints and is not approved for commercial distribution."
+            "No licence key, no trial, no subscription. The face models Clipivo downloads are "
+            "InsightFace's buffalo_l pack, for non-commercial research use under InsightFace's terms."
         )
         notice.setWordWrap(True)
         notice.setAlignment(Qt.AlignHCenter)
         notice.setStyleSheet(f"color: {PALETTE['muted']}; font-size: 10px;")
-        notice.setToolTip("Face-model licensing notice")
+        notice.setToolTip("Licence and face-model terms")
         layout.addWidget(notice)
 
         link_style = f"color:{PALETTE['accent']}; text-decoration:none"
@@ -88,14 +102,36 @@ class AboutDialog(QDialog):
         org.setToolTip("Clipivo is a Long Weekend Labs project")
         layout.addWidget(org)
 
+        licence_button = QPushButton("Licence")
+        licence_button.setToolTip("Show the full MIT licence")
+        licence_button.clicked.connect(self._show_licence)
         close_button = QPushButton("Close")
         close_button.setToolTip("Close the About window")
         close_button.clicked.connect(self.accept)
         row = QHBoxLayout()
         row.addStretch()
+        row.addWidget(licence_button)
         row.addWidget(close_button)
         row.addStretch()
         layout.addLayout(row)
+
+    def _show_licence(self) -> None:
+        """The licence as the repository ships it, read from LICENSE rather than retyped."""
+        try:
+            text = (APP_DIR / "LICENSE").read_text(encoding="utf-8")
+        except OSError:
+            text = f"MIT License. See {REPOSITORY_URL}/blob/main/LICENSE"
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Licence")
+        dialog.resize(560, 520)
+        box = QVBoxLayout(dialog)
+        view = QPlainTextEdit(text)
+        view.setReadOnly(True)
+        box.addWidget(view)
+        close = QPushButton("Close")
+        close.clicked.connect(dialog.accept)
+        box.addWidget(close, 0, Qt.AlignRight)
+        dialog.exec()
 
     @staticmethod
     def _lwl_mark(size: int) -> QPixmap:

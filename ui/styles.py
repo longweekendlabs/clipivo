@@ -21,7 +21,7 @@ def app_stylesheet() -> str:
         font-size: 12px;
         color: {p['text']};
     }}
-    QMainWindow, QDialog#filtersDialog, QWidget#root, QStackedWidget {{ background: {p['base']}; }}
+    QMainWindow, QDialog, QMessageBox, QWidget#root, QStackedWidget {{ background: {p['base']}; }}
     QMenuBar {{
         background: #11151a;
         border-bottom: 1px solid {p['border']};

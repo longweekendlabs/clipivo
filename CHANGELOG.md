@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-26
+
+### Added
+- Clipivo for Windows and macOS. Windows gets a per-user installer that never asks for administrator rights and a portable zip; macOS (Apple Silicon, macOS 14 or newer) gets a dmg. Linux gets rpm, deb and a tarball. All of them are built on GitHub from this repository.
+- Face matching uses the graphics card on more machines: DirectML on Windows (NVIDIA, AMD or Intel) and Core ML on macOS. On Linux with an NVIDIA card, Settings offers NVIDIA's CUDA libraries as an optional download of about 1.5 GB, used from the next start.
+- `clipivo --self-test` checks a build without opening a window and reports what it found.
+
+### Changed
+- The installers carry the app and nothing else. The face models (191 MB) download once on first launch, and on Windows and macOS so does ffmpeg; every file is checked against its published checksum, and copies already on the computer are used instead. The Linux rpm went from 834 MB to 147 MB.
+- Clipivo now finds and recognises faces with its own code on ONNX Runtime instead of the insightface package, which pulled in scipy, scikit-image, scikit-learn, matplotlib and onnx. Results are the same: on test frames every face, box and match came out identical.
+- Clipivo is free and open source under the MIT licence. About shows the licence and links to longweekendlabs.app, the repository and its issues page.
+
+### Fixed
+- Clipivo starts without VLC. Frame stepping, scans and saving still work, and it explains how to get VLC for playback.
+- Dialogs such as About and the download window used a light background with light text; they now follow the dark theme.
+
+
 ## [0.7.0] - 2026-10-26
 
 ### Added

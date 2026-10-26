@@ -22,6 +22,7 @@ from .framing import BORDER_SIZE, MAX_SIZES, normalise_framing, person_region, s
 from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
+from .downloads import tool_path
 
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
@@ -763,7 +764,7 @@ def validate_export(path: Path, *, expected_duration_ms: int = 0) -> None:
     tail_start_seconds = max(0.0, info.duration_ms / 1000 - 2.0)
     completed = subprocess.run(
         [
-            "ffmpeg", "-v", "error", "-xerror", "-ss", f"{tail_start_seconds:.3f}",
+            tool_path("ffmpeg"), "-v", "error", "-xerror", "-ss", f"{tail_start_seconds:.3f}",
             "-i", str(path), "-map", "0:v:0", "-frames:v", "2", "-f", "null", "-",
         ],
         capture_output=True,

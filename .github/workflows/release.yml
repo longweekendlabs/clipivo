@@ -1,0 +1,281 @@
+name: Build and Release
+
+# Never runs on a push or a pull request. Only a version tag, or the Run workflow
+# button. Nothing here can start on its own.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, for example v0.7.1. Leave blank to build artifacts only."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  # Lets the cleanup step delete this run's artifacts; without it they sit against the
+  # storage allowance.
+  actions: write
+
+env:
+  APP_NAME: clipivo
+
+jobs:
+  source:
+    name: Source archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(python3 tools/print_version.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Create source archives
+        shell: bash
+        run: |
+          mkdir -p release
+          git archive --format=zip --output="release/${APP_NAME}-v${{ steps.version.outputs.version }}-source.zip" HEAD
+          git archive --format=tar.gz --output="release/${APP_NAME}-v${{ steps.version.outputs.version }}-source.tar.gz" HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: release/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Unit tests
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          sudo apt-get install -y ffmpeg
+          python -m unittest discover -s tests -t .
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(python tools/print_version.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Build application
+        shell: bash
+        run: python -m PyInstaller --clean --noconfirm clipivo_app.spec
+
+      - name: Self-test the build
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: dist/clipivo/clipivo --self-test
+
+      - name: Package tarball, deb and rpm
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash ./packaging/linux/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: release/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build application
+        shell: pwsh
+        run: python -m PyInstaller --clean --noconfirm clipivo_app.spec
+
+      - name: Self-test the build
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $env:CLIPIVO_SELF_TEST_FILE = "$PWD\self-test.json"
+          $process = Start-Process -FilePath "dist\clipivo\clipivo.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if (Test-Path self-test.json) { Get-Content self-test.json } else { throw "self-test wrote no report" }
+          if ($process.ExitCode -ne 0) { throw "self-test failed" }
+
+      - name: Package portable zip and installer
+        shell: pwsh
+        run: |
+          $version = python tools/print_version.py
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Path "dist/clipivo/*" -DestinationPath "release/clipivo-v$version-windows-x64-portable.zip" -Force
+          # Braces around the variable name are required: $env:ProgramFiles(x86) parses as
+          # $env:ProgramFiles followed by (x86) and loses the space.
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $nsis)) { $nsis = "${env:ProgramFiles}\NSIS\makensis.exe" }
+          if (-not (Test-Path $nsis)) {
+            choco install nsis -y --no-progress
+            $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          }
+          if (-not (Test-Path $nsis)) { throw "NSIS not found at $nsis" }
+          & $nsis /DVERSION=$version packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: release/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS Apple Silicon
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Build app bundle and disk image
+        shell: bash
+        run: |
+          VERSION="$(python tools/print_version.py)"
+          mkdir -p build/icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/icons/clipivo.png --out "build/icon.iconset/icon_${size}x${size}.png" >/dev/null
+            sips -z $((size * 2)) $((size * 2)) assets/icons/clipivo.png --out "build/icon.iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns build/icon.iconset -o assets/icons/clipivo.icns
+
+          python -m PyInstaller --clean --noconfirm clipivo_app.spec
+          QT_QPA_PLATFORM=offscreen "dist/Clipivo.app/Contents/MacOS/clipivo" --self-test
+
+          mkdir -p release
+          ditto -c -k --keepParent "dist/Clipivo.app" "release/${APP_NAME}-v${VERSION}-macos-arm64.zip"
+          hdiutil create -volname "Clipivo" -srcfolder "dist/Clipivo.app" -ov -format UDZO "release/${APP_NAME}-v${VERSION}-macos-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: release/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: [source, linux, windows, macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release notes from the changelog
+        shell: bash
+        env:
+          TAG_NAME: ${{ steps.release.outputs.tag }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\[" version "\\]" { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Clipivo ${VERSION}." > notes.md; fi
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease || false }}
+        shell: bash
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" release-assets/* --clobber
+          else
+            prerelease_flag=""
+            if [ "$PRERELEASE" = "true" ]; then prerelease_flag="--prerelease"; fi
+            gh release create "$TAG_NAME" release-assets/* --title "Clipivo ${TAG_NAME#v}" --notes-file notes.md $prerelease_flag
+          fi
+
+      - name: Delete workflow artifacts
+        # Release assets are free and unaffected; build artifacts count against storage.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | select(.name != "github-pages") | .id' \
+            | while read -r id; do
+            echo "deleting artifact ${id}"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" || true
+          done
