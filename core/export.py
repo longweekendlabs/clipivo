@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,9 +15,10 @@ from threading import Event, Thread
 from typing import Callable
 
 from .filters import VideoFilter, active_filters, audio_filtergraph, video_filtergraph
-from .framing import crop_filter, output_size, scale_filter, shot_crop
+from .framing import canvas_size, crop_filter, fit_filter, framed_shots, scale_filter
 from .models import ClipRange
 from .timecode import ffmpeg_time
+from .video_probe import ProbeError, probe_video
 
 
 class ExportError(RuntimeError):
@@ -24,21 +26,75 @@ class ExportError(RuntimeError):
 
 
 def _with_framed_size(shape: OutputShape, clips: list[ClipRange]) -> OutputShape:
-    """One output size for every framed shot: the typical crop size, capped by the size limit."""
+    """One canvas for every framed shot, sized from the crops, capped by the size limit."""
     if shape.framing == "whole" or not all(shape.frame_size):
         return shape
-    shorts = []
-    for clip in clips:
-        frame = tuple(clip.frame) if clip.frame else shape.frame_size
-        for shot in clip.shots or [{"start": clip.start_ms, "points": []}]:
-            width, height, _keys, _y = shot_crop(shot, shape.framing, frame)
-            shorts.append(min(width, height))
-    if not shorts:
+    crops = [(*crop[:2], end - start) for clip in clips for start, end, crop in shape.runs(clip)]
+    if not crops:
         return shape
-    short = sorted(shorts)[len(shorts) // 2]
-    if shape.max_short_side:
-        short = min(short, shape.max_short_side)
-    return replace(shape, out_short=max(2, int(short) // 2 * 2))
+    canvas, scale = canvas_size(crops, shape.max_short_side)
+    return replace(shape, canvas=canvas, canvas_scale=scale)
+
+
+def _same_panel(first: tuple, second: tuple, frame: tuple[int, int]) -> bool:
+    """Two unmoving crops with the same left and right edges, within 1% of the picture."""
+    (w1, _h1, keys1, _y1), (w2, _h2, keys2, _y2) = first, second
+    if len(keys1) != 1 or len(keys2) != 1:
+        return False
+    tolerance = frame[0] * 0.01
+    return abs(w1 - w2) <= tolerance and abs(keys1[0][1] - keys2[0][1]) <= tolerance
+
+
+def framed_durations(shape: OutputShape, clips: list[ClipRange]) -> list[int]:
+    """Length each clip will have once framing has left out shots without the person (or
+    of the wrong shape); 0 for a clip that is left out entirely."""
+    return [sum(piece.duration_ms for piece, _chain in shape.pieces(clip)) for clip in clips]
+
+
+def detect_repeat_cycle(source: Path, clips: list[ClipRange], seconds: float = 3.0) -> int:
+    """N when the source shows one repeated frame in every N, steadily, else 0.
+
+    A few seconds are read from up to three clips. Converted broadcasts (50 fps published
+    as 60 fps) repeat a frame in a fixed rhythm, which plays as a hitch several times a
+    second; a frame that repeats now and then (a still picture) is not a rhythm.
+    """
+    import cv2
+    import numpy as np
+    import av
+
+    gaps: list[int] = []
+    for clip in sorted(clips, key=lambda item: -item.duration_ms)[:3]:
+        middle = (clip.start_ms + clip.end_ms) / 2000
+        try:
+            container = av.open(str(source))
+        except (OSError, av.error.FFmpegError):
+            return 0
+        try:
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            container.seek(int(middle / float(stream.time_base)), stream=stream, backward=True)
+            previous, index, last_repeat = None, 0, None
+            for frame in container.decode(stream):
+                if frame.pts is None:
+                    continue
+                moment = float(frame.pts * stream.time_base)
+                if moment < middle:
+                    continue
+                if moment > middle + seconds:
+                    break
+                small = cv2.resize(frame.to_ndarray(format="gray"), (160, 90), interpolation=cv2.INTER_AREA).astype(np.int16)
+                if previous is not None and float(np.abs(small - previous).mean()) < 0.3:
+                    if last_repeat is not None:
+                        gaps.append(index - last_repeat)
+                    last_repeat = index
+                previous = small
+                index += 1
+        finally:
+            container.close()
+    if len(gaps) < 8:
+        return 0
+    cycle = max(set(gaps), key=gaps.count)
+    return cycle if 3 <= cycle <= 12 and gaps.count(cycle) >= 0.85 * len(gaps) else 0
 
 
 def cover_stream_index(source: Path) -> int | None:
@@ -122,6 +178,9 @@ def clean_stale_work(max_age_hours: float = 6.0) -> None:
             continue
 
 
+MIN_RUN_MS = 1000
+
+
 @dataclass(frozen=True)
 class OutputShape:
     """How re-encoded output looks: quality (50-100), size limit on the shorter side, framing."""
@@ -130,8 +189,16 @@ class OutputShape:
     max_short_side: int = 0
     framing: str = "whole"
     frame_size: tuple[int, int] = (0, 0)
-    # Shorter side of framed output; chosen from the typical crop so nothing is blown up.
-    out_short: int = 0
+    # Size of framed output; chosen from the crops so a stitched video keeps one size.
+    canvas: tuple[int, int] = (0, 0)
+    canvas_scale: float = 1.0
+    # The source repeats one frame in every this many (a 50 fps broadcast published at
+    # 60 fps): re-encoded output drops the repeats so it plays smoothly. 0 = none.
+    repeat_cycle: int = 0
+    # The source's video codec and bitrate: re-encoded output never spends more on the
+    # pixels it keeps than the source did, allowing for the codecs' efficiency.
+    source_codec: str = ""
+    source_kbps: int = 0
 
     def needs_reencode(self) -> bool:
         width, height = self.frame_size
@@ -141,24 +208,43 @@ class OutputShape:
     def pieces(self, clip: ClipRange) -> list[tuple[ClipRange, tuple[str, str]]]:
         """Split a clip into exportable pieces with (before, after) user-filter chains.
 
-        Whole picture is one piece. Crop to person gives one piece per camera shot, each with
-        its own crop, all scaled to the same output size.
+        Whole picture is one piece. Following a person gives one piece per kept camera shot,
+        each with its own crop, scaled and centred on one canvas. A clip can have no pieces.
         """
         if self.framing == "whole" or not all(self.frame_size):
             return [(clip, ("", scale_filter(self.max_short_side) if self.max_short_side else ""))]
-        frame = tuple(clip.frame) if clip.frame else self.frame_size
-        out_w, out_h = output_size(self.framing, self.out_short or self.max_short_side)
-        after = f"scale={out_w}:{out_h}:flags=lanczos,setsar=1"
-        shots = clip.shots or [{"start": clip.start_ms, "end": clip.end_ms, "points": [], "band": None}]
+        canvas = self.canvas
         pieces = []
-        for shot in shots:
+        for start, end, (width, height, keys, y) in self.runs(clip):
+            after = fit_filter(width, height, canvas if all(canvas) else (width, height), self.canvas_scale)
+            pieces.append((ClipRange(start, end, origin=clip.origin), (crop_filter(width, height, keys, y), after)))
+        return pieces
+
+    def runs(self, clip: ClipRange) -> list[tuple[int, int, tuple]]:
+        """(start, end, crop) for each stretch of a clip saved with one crop."""
+        frame = tuple(clip.frame) if clip.frame else self.frame_size
+        runs: list[list] = []
+        for shot, (width, height, keys, y) in self.kept_shots(clip):
             start, end = max(clip.start_ms, int(shot["start"])), min(clip.end_ms, int(shot["end"]))
             if end - start < 40:
                 continue
-            width, height, keys, y = shot_crop(shot, self.framing, frame)
-            piece = ClipRange(start, end, origin=clip.origin)
-            pieces.append((piece, (crop_filter(width, height, keys, y), after)))
-        return pieces or [(clip, (crop_filter(*shot_crop({"start": clip.start_ms, "points": []}, self.framing, frame)), after))]
+            last = runs[-1] if runs else None
+            if last and last[1] == start and _same_panel(last[3], (width, height, keys, y), frame):
+                # A cut elsewhere in the picture (another panel of a split screen) leaves this
+                # person's panel where it was: keep one piece, cropped as its longest shot was,
+                # since a short shot gives less to judge the panel's top and bottom by.
+                if end - start > last[2]:
+                    last[2], last[3] = end - start, (width, height, keys, y)
+                last[1] = end
+                continue
+            runs.append([start, end, end - start, (width, height, keys, y)])
+        # A stretch under a second with its own crop is a layout changing (an animated
+        # transition), not a view of the person: leave it out.
+        return [(start, end, crop) for start, end, _longest, crop in runs if end - start >= MIN_RUN_MS]
+
+    def kept_shots(self, clip: ClipRange) -> list[tuple[dict, tuple]]:
+        frame = tuple(clip.frame) if clip.frame else self.frame_size
+        return framed_shots(clip.shots or [], self.framing, frame)
 
 
 ProgressFn = Callable[[int, int, str], None]
@@ -217,8 +303,27 @@ def export_ranges(
         if mode == "copy":
             encoder_label = "Stream copy"
         else:
-            encoder_label = "NVIDIA NVENC" if resolved_encoder == "nvenc" else "CPU libx264"
+            encoder_label = "NVIDIA NVENC" if resolved_encoder == "nvenc" else "CPU libx265"
         shape = _with_framed_size(shape or OutputShape(), enabled)
+        if mode == "accurate":
+            try:
+                info = probe_video(source, include_keyframes=False)
+                shape = replace(
+                    shape, source_codec=info.video_codec,
+                    source_kbps=source_video_bitrate_kbps or info.video_bitrate_kbps,
+                    frame_size=shape.frame_size if all(shape.frame_size) else (info.width, info.height),
+                )
+            except ProbeError:
+                pass
+            shape = replace(shape, repeat_cycle=detect_repeat_cycle(source, enabled))
+            if shape.repeat_cycle:
+                logs.append(f"Source repeats one frame in every {shape.repeat_cycle}; dropping the repeats.")
+        if shape.framing != "whole" and all(shape.frame_size):
+            # Following a person leaves out shots without them, or of the wrong shape.
+            enabled = [clip for clip in enabled if shape.pieces(clip)]
+            if not enabled:
+                wanted = "" if shape.framing == "dynamic" else f" in a {shape.framing} view"
+                raise ExportError(f"The person was not found{wanted} in any clip, so nothing was saved.")
         if stitched:
             pieces = [piece for clip in enabled for piece in shape.pieces(clip)]
             result = [
@@ -383,11 +488,13 @@ def _export_one(
         if include_audio:
             command.extend(["-map", "0:a:0?"])
         before, after = chain
-        video_chain = ",".join(part for part in (before, video_filtergraph(filters, source_fps), after) if part)
+        steady = f"decimate=cycle={shape.repeat_cycle}" if shape.repeat_cycle else ""
+        video_chain = ",".join(part for part in (before, steady, video_filtergraph(filters, source_fps), after) if part)
         if video_chain:
             command.extend(["-vf", video_chain])
+        ceiling = _bitrate_ceiling(shape, before)
         command.extend(_video_encoder_arguments(
-            "nvenc" if video_encoder == "nvenc" else "cpu", source_video_bitrate_kbps, shape.quality,
+            "nvenc" if video_encoder == "nvenc" else "cpu", source_video_bitrate_kbps, shape.quality, ceiling,
         ))
         if include_audio:
             audio_chain = audio_filtergraph(filters, source_fps)
@@ -403,8 +510,8 @@ def _export_one(
         except ExportError:
             if video_encoder != "nvenc" or not allow_encoder_fallback or cancel_event.is_set():
                 raise
-            logs.append("NVIDIA NVENC failed; retrying this clip with CPU libx264.")
-            cpu_command = _replace_nvenc_with_libx264(command, source_video_bitrate_kbps, shape.quality)
+            logs.append("NVIDIA NVENC failed; retrying this clip with CPU libx265.")
+            cpu_command = _replace_nvenc_with_cpu(command, source_video_bitrate_kbps, shape.quality, ceiling)
             _run(cpu_command, cancel_event, logs, duration, progress_fraction)
     except Exception:
         target.unlink(missing_ok=True)
@@ -486,7 +593,7 @@ def nvenc_available() -> bool:
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
-    return completed.returncode == 0 and "h264_nvenc" in completed.stdout
+    return completed.returncode == 0 and "hevc_nvenc" in completed.stdout
 
 
 def _resolve_video_encoder(preference: str) -> str:
@@ -501,38 +608,72 @@ def _resolve_video_encoder(preference: str) -> str:
     raise ExportError(f"Unknown video encoder preference: {preference}")
 
 
-def _replace_nvenc_with_libx264(command: list[str], source_video_bitrate_kbps: int = 0, quality: int = 95) -> list[str]:
+def _replace_nvenc_with_cpu(
+    command: list[str], source_video_bitrate_kbps: int = 0, quality: int = 95, ceiling: int = 0,
+) -> list[str]:
     start = command.index("-c:v")
     end = start + 2
     while end < len(command) and command[end] not in {"-c:a", "-af", "-movflags"}:
         end += 1
     return [
         *command[:start],
-        *_video_encoder_arguments("cpu", source_video_bitrate_kbps, quality),
+        *_video_encoder_arguments("cpu", source_video_bitrate_kbps, quality, ceiling),
         *command[end:],
     ]
 
 
-def _video_encoder_arguments(encoder: str, source_video_bitrate_kbps: int = 0, quality: int = 95) -> list[str]:
-    """H.264 for re-encoded output. Quality 95 (and 100 when re-encoding is unavoidable) is
-    about VMAF 98 against the source; each 5 points lower trades detail for a smaller file.
+# Bits a codec needs for the same picture quality, relative to H.264.
+_CODEC_COST = {"h264": 1.0, "hevc": 0.6, "vp9": 0.6, "av1": 0.45, "mpeg4": 1.4, "mpeg2video": 2.0}
+_OUTPUT_COST = _CODEC_COST["hevc"]
+# Room above the source's share for detail that gathers where the person is.
+_CEILING_HEADROOM = 1.5
 
-    The ceiling only stops a very compact source, such as AV1, from ballooning.
+
+def _bitrate_ceiling(shape: OutputShape, crop_chain: str) -> int:
+    """Most kbit/s a re-encoded piece may use: the source's bitrate for the share of the
+    picture kept (after any Size shrinking), adjusted from the source's codec to HEVC.
+    0 when the source's bitrate is unknown."""
+    width, height = shape.frame_size
+    if not shape.source_kbps or not width or not height:
+        return 0
+    kept_w, kept_h = width, height
+    match = re.match(r"crop=(\d+):(\d+)", crop_chain or "")
+    if match:
+        kept_w, kept_h = int(match.group(1)), int(match.group(2))
+    scale = shape.canvas_scale if match else 1.0
+    if not match and shape.max_short_side and min(width, height) > shape.max_short_side:
+        scale = shape.max_short_side / min(width, height)
+    share = kept_w * kept_h * scale * scale / (width * height)
+    cost = _OUTPUT_COST / _CODEC_COST.get(shape.source_codec, 1.0)
+    return max(150, round(shape.source_kbps * share * cost * _CEILING_HEADROOM))
+
+
+def _video_encoder_arguments(
+    encoder: str, source_video_bitrate_kbps: int = 0, quality: int = 95, ceiling: int = 0,
+) -> list[str]:
+    """HEVC for re-encoded output: about a third smaller than H.264 at the same quality.
+    Quality 95 (and 100 when re-encoding is unavoidable) is visually the source; each 5
+    points lower trades detail for a smaller file.
+
+    `ceiling` (kbit/s) keeps the file from outgrowing the source; without one, a loose
+    ceiling only stops a very compact source, such as AV1, from ballooning.
     """
     quality = max(50, min(95, int(quality)))
     crf = 16 + (95 - quality) * 0.4  # 95 -> 16, 90 -> 18, 80 -> 22, 70 -> 26, 50 -> 34
     source_rate = max(0, int(source_video_bitrate_kbps))
-    ceiling = max(8_000, source_rate * 4) if source_rate else 0
+    if not ceiling:
+        ceiling = max(8_000, source_rate * 4) if source_rate else 0
     if encoder == "nvenc":
         arguments = [
-            "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-profile:v", "high",
-            "-rc", "vbr", "-cq", f"{round(crf) + 3}", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_nvenc", "-preset", "p7", "-tune", "hq", "-profile:v", "main",
+            "-rc", "vbr", "-cq", f"{round(crf) + 4}", "-b:v", "0", "-pix_fmt", "yuv420p",
         ]
     else:
         arguments = [
-            "-c:v", "libx264", "-preset", "slow", "-crf", f"{round(crf)}", "-profile:v", "high",
-            "-pix_fmt", "yuv420p",
+            "-c:v", "libx265", "-preset", "medium", "-crf", f"{round(crf) + 2}", "-pix_fmt", "yuv420p",
+            "-x265-params", "log-level=error",
         ]
+    arguments.extend(["-tag:v", "hvc1"])
     if ceiling:
         arguments.extend(["-maxrate", f"{ceiling}k", "-bufsize", f"{ceiling * 2}k"])
     return arguments

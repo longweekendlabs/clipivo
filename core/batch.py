@@ -18,7 +18,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
-from .framing import MAX_SIZES, find_static_band, normalise_framing, split_shots
+from .framing import BORDER_SIZE, MAX_SIZES, normalise_framing, person_region, split_shots
 from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
@@ -524,13 +524,102 @@ def _scan_refinement_window(
 
 TRACK_STEP_MS = 400
 _CUT_DIFFERENCE = 24.0
+# Colour frames kept per clip for finding panels (about 400 KB each).
+_MAX_BORDER_FRAMES = 300
+
+
+class _Follower:
+    """Finds the person in tracking samples cheaply.
+
+    Faces are found with the 640 px detector, falling back to the wide-shot one only when
+    the person is not among them. Inside one camera shot the person is the face that
+    overlaps where they were 0.4 s earlier, so faces are only recognised after a cut, when
+    that is unclear, and every few seconds to make sure.
+    """
+
+    RECHECK_SAMPLES = 10
+
+    def __init__(self, face_engine: FaceEngine, target_id: str, reference_matrix, threshold: float):
+        self.wide = face_engine
+        factory = getattr(face_engine, "standard_engine", None)
+        self.fast = factory() if callable(factory) else face_engine
+        self.cheap = callable(getattr(self.fast, "detect_faces", None))
+        self.target_id, self.matrix, self.threshold = target_id, reference_matrix, threshold
+        self.previous = None
+        self.unchecked = 0
+
+    def new_shot(self) -> None:
+        self.previous = None
+
+    def locate(self, image) -> tuple[tuple | None, list[tuple]]:
+        """(the person's face box or None, every other face box)."""
+        if not self.cheap:
+            matcher = getattr(self.wide, "match_frame_many", None)
+            if callable(matcher):
+                assessment = matcher(image, {self.target_id: (self.matrix, self.threshold)})[self.target_id]
+            else:
+                assessment = self.wide.match_frame(image, self.matrix, self.threshold)
+            box = getattr(assessment, "box", None) if assessment.matched else None
+            return box, [face for face in getattr(assessment, "faces", ()) if box is None or tuple(face) != tuple(box)]
+        for engine in (self.fast, self.wide):
+            faces = engine.detect_faces(image)
+            index = self._follow(faces)
+            if index is not None and self.unchecked >= self.RECHECK_SAMPLES:
+                if engine.face_scores(image, [faces[index]], self.matrix)[0] >= self.threshold:
+                    self.unchecked = 0
+                else:
+                    index = None
+            if index is None and faces:
+                scores = engine.face_scores(image, faces, self.matrix)
+                best = max(range(len(faces)), key=scores.__getitem__)
+                index = best if scores[best] >= self.threshold else None
+                self.unchecked = 0
+            if index is not None:
+                self.previous = faces[index][0]
+                self.unchecked += 1
+                return faces[index][0], [box for position, (box, _marks) in enumerate(faces) if position != index]
+            if engine is self.wide or self.fast is self.wide:
+                break
+        self.previous = None
+        return None, [box for box, _marks in faces]
+
+    def _follow(self, faces: list) -> int | None:
+        if self.previous is None:
+            return None
+        near = [index for index, (box, _marks) in enumerate(faces) if _overlap(box, self.previous) >= 0.3]
+        return near[0] if len(near) == 1 else None
+
+
+def _overlap(first: tuple, second: tuple) -> float:
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    inter = width * height
+    area = lambda box: (box[2] - box[0]) * (box[3] - box[1])
+    return inter / (area(first) + area(second) - inter)
+
+
+def _cut_thumbnail(frame):
+    """64x36 greyscale for the cut test, read from the frame's brightness plane when it is
+    8-bit, which is far cheaper than scaling the whole picture."""
+    import cv2
+    import numpy as np
+
+    if frame.format.name in {"yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "nv12"}:
+        plane = frame.planes[0]
+        luma = np.frombuffer(plane, dtype=np.uint8).reshape(plane.height, plane.line_size)[:, : plane.width]
+        step = max(1, plane.width // 256)
+        return cv2.resize(luma[::step, ::step], (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
+    return frame.reformat(width=64, height=36, format="gray").to_ndarray().astype(np.float32)
 
 
 def untracked_clips(ranges: list[ClipRange]) -> list[ClipRange]:
-    """Clips with no person framing data, or whose edges were moved past what was tracked."""
+    """Clips with no person framing data (or data from before regions were found), or whose
+    edges were moved past what was tracked."""
     def covered(clip: ClipRange) -> bool:
         shots = clip.shots or []
-        return bool(shots and clip.frame) and (
+        return bool(shots and clip.frame) and all("region" in shot for shot in shots) and (
             int(shots[0]["start"]) <= clip.start_ms + 120 and int(shots[-1]["end"]) >= clip.end_ms - 120
         )
 
@@ -552,23 +641,30 @@ def track_person_in_clips(
     """Fill each clip's `shots` and `frame` for person framing.
 
     Every frame inside a clip is decoded to find camera cuts; the face is checked every
-    TRACK_STEP_MS, and a small greyscale copy of each checked frame is kept to find static
-    bottom graphics per shot.
+    TRACK_STEP_MS. Small greyscale copies of checked frames are kept to find, per shot, the
+    person's split-screen panel and any static bottom graphics.
     """
     import numpy as np
 
     total = max(1, sum(clip.duration_ms for clip in ranges))
     done = 0
+    follower = _Follower(face_engine, target_id, reference_matrix, threshold)
     for clip in ranges:
         if cancelled and cancelled():
             return
+        follower.new_shot()
         points: list[list[float]] = []
         cuts: list[int] = []
         smalls: list[tuple[int, object]] = []
+        borders: list[tuple[int, object]] = []
+        border_every = 2
+        others: dict[int, list] = {}
+        boxes: dict[int, tuple] = {}
         frame_size = (0, 0)
         previous = None
         recent: list[float] = []
         next_sample_ms = clip.start_ms
+        last_progress_ms = -1000
         container = av.open(str(Path(source)))
         try:
             stream = container.streams.video[0]
@@ -584,37 +680,54 @@ def track_person_in_clips(
                 if timestamp_ms > clip.end_ms:
                     break
                 # Bottom graphics stay put across cuts; leave them out of the cut test.
-                tiny = frame.reformat(width=64, height=36, format="gray").to_ndarray().astype(np.float32)[:28]
+                tiny = _cut_thumbnail(frame)[:28]
                 if timestamp_ms >= clip.start_ms and previous is not None:
                     difference = float(np.abs(tiny - previous).mean())
                     typical = median(recent) if recent else 0.0
                     if difference > _CUT_DIFFERENCE and difference > typical * 3 + 4:
                         cuts.append(timestamp_ms)
+                        follower.new_shot()
                     recent = (recent + [difference])[-12:]
                 previous = tiny
                 if timestamp_ms < clip.start_ms or timestamp_ms < next_sample_ms:
                     continue
                 next_sample_ms = timestamp_ms + TRACK_STEP_MS
+                if progress and timestamp_ms - last_progress_ms >= 1000:
+                    # Report inside the clip: one long appearance can take minutes to follow.
+                    progress(done + timestamp_ms - clip.start_ms, total)
+                    last_progress_ms = timestamp_ms
                 image = frame.to_ndarray(format="bgr24")
                 frame_size = (int(image.shape[1]), int(image.shape[0]))
                 smalls.append((timestamp_ms, frame.reformat(width=160, height=90, format="gray").to_ndarray()))
-                matcher = getattr(face_engine, "match_frame_many", None)
-                if callable(matcher):
-                    assessment = matcher(image, {target_id: (reference_matrix, threshold)})[target_id]
-                else:
-                    assessment = face_engine.match_frame(image, reference_matrix, threshold)
-                box = getattr(assessment, "box", None)
-                if assessment.matched and box:
-                    points.append([timestamp_ms, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[3] - box[1]])
+                if len(smalls) % border_every == 0:
+                    borders.append((timestamp_ms, frame.reformat(width=BORDER_SIZE[0], height=BORDER_SIZE[1], format="bgr24").to_ndarray()))
+                    if len(borders) > _MAX_BORDER_FRAMES:
+                        # Bound memory on long clips: keep every other frame and sample half as often.
+                        borders = borders[::2]
+                        border_every *= 2
+                box, other_boxes = follower.locate(image)
+                if box:
+                    points.append([timestamp_ms, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[3] - box[1], box[2] - box[0]])
+                    boxes[timestamp_ms] = box
+                    others[timestamp_ms] = other_boxes
         finally:
             container.close()
         if frame_size[1]:
-            height = frame_size[1]
             clip.frame = list(frame_size)
-            clip.shots = split_shots(
-                clip.start_ms, clip.end_ms, cuts, points,
-                lambda start, end: find_static_band([small for t, small in smalls if start <= t < end], height),
-            )
+
+            def describe(start: int, end: int, shot_points: list, size=frame_size) -> dict:
+                times = [int(point[0]) for point in shot_points]
+                inside = [image for t, image in borders if start <= t < end]
+                step = max(1, len(inside) // 15)
+                return person_region(
+                    inside[::step],
+                    [small for t, small in smalls if start <= t < end],
+                    [boxes[t] for t in times],
+                    [others.get(t, []) for t in times],
+                    size,
+                )
+
+            clip.shots = split_shots(clip.start_ms, clip.end_ms, cuts, points, describe)
         done += clip.duration_ms
         if progress:
             progress(done, total)

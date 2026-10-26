@@ -1628,15 +1628,16 @@ class MainWindow(QMainWindow):
             self.ready_text.setText("Cancelled")
         elif status == "completed":
             folder = str(Path(outputs[0]).parent) if outputs else ""
-            self.video_job.show_finished(detail, folder)
+            self.video_job.show_finished(detail, folder, announce=True)
             self.ready_text.setText(f"Saved · {name}")
         elif status == "no_match":
             self.video_job.show_finished(
-                f"{name} wasn't found. Try more varied photos, or lower Match strictness in Settings.", success=False
+                f"{name} wasn't found. Try more varied photos, or lower Match strictness in Settings.",
+                success=False, announce=True,
             )
             self.ready_text.setText(f"{name} not found")
         else:
-            self.video_job.show_finished(f"Failed: {detail}", success=False)
+            self.video_job.show_finished(f"Failed: {detail}", success=False, announce=True)
             self.ready_text.setText("Failed")
 
     def _video_job_stopped(self, worker: BatchExecutionWorker) -> None:
@@ -1812,14 +1813,14 @@ class MainWindow(QMainWindow):
         self._close_job_dialog()
         folder = str(outputs[0].parent) if outputs else ""
         self.ready_text.setText("Saved")
-        self.video_job.show_finished(f"Saved {len(outputs)} file{'s' if len(outputs) != 1 else ''}", folder)
+        self.video_job.show_finished(f"Saved {len(outputs)} file{'s' if len(outputs) != 1 else ''}", folder, announce=True)
 
     def _export_failed(self, detail: str) -> None:
         self._close_job_dialog()
         self.ready_text.setText("Save failed")
         cancelled = "cancel" in detail.lower()
         self.video_job.show_finished(
-            "Cancelled. Nothing was saved." if cancelled else f"Save failed: {detail}", success=False
+            "Cancelled. Nothing was saved." if cancelled else f"Save failed: {detail}", success=False, announce=not cancelled
         )
 
     def _set_status_for_info(self, info: VideoInfo) -> None:

@@ -26,15 +26,21 @@ Clipivo checks a frame every two seconds across the complete video with a high-r
 
 By default Clipivo copies the original video stream without re-encoding it, so every frame in the result is identical to the source and saving takes seconds. Each clip starts at the keyframe just before the person appears, usually a second or a few early, and clips that then overlap are merged so nothing repeats.
 
-When you need cuts on the exact frame, choose Exact frames. It re-encodes at high quality with H.264, on an NVIDIA card with NVENC or on the CPU. Either way, everything Start saves is checked for the expected length and decoded through to its last frames before it is called done.
+When you need cuts on the exact frame, choose Exact frames. It re-encodes at high quality with HEVC (H.265), on an NVIDIA card with NVENC or on the CPU. Either way, everything Start saves is checked for the expected length and decoded through to its last frames before it is called done.
 
 ## Smaller files when you want them
 
-A Quality slider runs from 50% to 100%. At 100% the original is copied untouched; lower values re-encode on the exact frames into smaller files for videos you only want to keep a glimpse of.
+A Quality slider runs from 50% to 100%. At 100% the original is copied untouched; lower values re-encode on the exact frames into smaller files for videos you only want to keep a glimpse of. Re-encoded video is HEVC (H.265), and it never spends more on the part of the picture it keeps than the source did.
 
 Size keeps the original or limits output to 1440p, 1080p or 720p by the shorter side, so a 4K video in 16:9, 4:3 or portrait keeps its shape and nothing is ever enlarged.
 
-Frame can crop to the person. Choose Crop to person and Clipivo makes a vertical video that tracks them through every clip: each camera shot gets its own crop, the crop pans when they move, and news tickers and banners at the bottom are kept out. A split screen or a reporter beside the news footage becomes a picture of just them, and every shot is scaled to one size, so a stitched video never changes shape.
+## Just the person, at the size they were
+
+Frame can follow the person instead of keeping the whole picture. In every camera shot Clipivo finds their own part of it: the window or split-screen panel they sit in, with the other guests, the news footage beside them and the background around it left out. In a full-screen studio shot it keeps the picture down to the headline banner and leaves other people out.
+
+Dynamic keeps every shot, whatever its shape. Landscape only, portrait only and square only keep just the shots where the person is seen in that shape. Each shot keeps the person at the size they had in the source, centred on one canvas, so a stitched video never changes size and nothing is blown up.
+
+Following someone through a broadcast is mostly throwing pixels away, so the result is usually far smaller than the source: a 13-minute panel show of 215 MB came out as an 80 MB video of the one guest. Broadcasts published at 60 fps from a 50 fps signal repeat a frame in every six; Clipivo drops the repeats, so the result plays smoothly.
 
 ## Batch: many videos, many people, unattended
 

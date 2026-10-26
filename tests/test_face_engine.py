@@ -58,6 +58,18 @@ class FaceEngineTests(unittest.TestCase):
         self.assertEqual(results[1].reason, "No usable face found")
         self.assertIn("Multiple faces", results[2].warning)
 
+    def test_face_cropped_tight_is_found_with_a_border(self) -> None:
+        class TightCropApplication:
+            # Like the real detector, it misses a face that fills the whole picture.
+            def get(self, image):
+                return [FakeFace([1.0, 0.0])] if image.shape[0] > 300 else []
+
+        engine = TestInsightFaceEngine({})
+        engine.application = TightCropApplication()
+        engine._decode = staticmethod(lambda data: np.zeros((200, 140, 3), dtype=np.uint8))
+        results = engine.assess_references([("tight.png", b"tight")])
+        self.assertTrue(results[0].valid)
+
     def test_reference_outlier_is_warned_without_rejecting_it(self) -> None:
         faces = {f"same-{index}".encode(): [FakeFace([1, 0])] for index in range(4)}
         faces[b"outlier"] = [FakeFace([-1, 0])]

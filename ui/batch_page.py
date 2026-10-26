@@ -38,7 +38,7 @@ from core.batch import (
     validate_export,
 )
 from core.character_store import CharacterStore
-from core.export import ExportError, OutputShape, export_ranges, extract_cover, snap_to_keyframes
+from core.export import ExportError, OutputShape, export_ranges, extract_cover, framed_durations, snap_to_keyframes
 from core.naming import output_base_name
 from core.face_engine import FaceEngine
 from core.filters import VideoFilter
@@ -116,6 +116,8 @@ class BatchExecutionWorker(QThread):
             raise RuntimeError("Nobody is chosen for this video")
         self.entryUpdated.emit(entry.id, "analysing", 1, "Reading video…", [])
         info = probe_video(source, include_keyframes=False)
+        # Following a person through every shot takes about as long as the scan; give it room on the bar.
+        scan_end = 33 if self.configuration.framing != "whole" else 63
         results = analyse_video_for_characters(
             source,
             self.face_engine,
@@ -124,10 +126,10 @@ class BatchExecutionWorker(QThread):
             cancelled=self._cancelled,
             wait_if_paused=self._wait_if_paused,
             progress=lambda current, total, label: self.entryUpdated.emit(
-                entry.id, "analysing", min(70, round(current / max(1, total) * 70)), label, [],
+                entry.id, "analysing", min(scan_end, round(current / max(1, total) * scan_end)), label, [],
             ),
             refine_progress=lambda done, total: self.entryUpdated.emit(
-                entry.id, "analysing", 63 + round(done / max(1, total) * 7), f"Tightening clip edges {done + 1} of {total}", [],
+                entry.id, "analysing", scan_end + round(done / max(1, total) * 7), f"Tightening clip edges {done + 1} of {total}", [],
             ),
         )
         if self._cancelled():
@@ -141,7 +143,8 @@ class BatchExecutionWorker(QThread):
                     source, self.face_engine, target.id, self.face_engine.reference_matrix(target.references),
                     target.threshold, list(result.ranges), cancelled=self._cancelled, wait_if_paused=self._wait_if_paused,
                     progress=lambda done, total, name=result.character_name: self.entryUpdated.emit(
-                        entry.id, "analysing", 70, f"Following {name} through each shot · {round(done / max(1, total) * 100)}%", [],
+                        entry.id, "analysing", scan_end + 7 + round(done / max(1, total) * (63 - scan_end)),
+                        f"Following {name} through each shot · {round(done / max(1, total) * 100)}%", [],
                     ),
                 )
             if self._cancelled():
@@ -210,7 +213,11 @@ class BatchExecutionWorker(QThread):
                 output_name=base_name,
                 shape=shape,
             )
-            expected = [sum(item.duration_ms for item in ranges)] if stitched else [item.duration_ms for item in ranges]
+            lengths = [item.duration_ms for item in ranges]
+            if shape.framing != "whole":
+                # Framing leaves out shots without the person, or of the wrong shape.
+                lengths = [length for length in framed_durations(shape, ranges) if length]
+            expected = [sum(lengths)] if stitched else lengths
             for position, (output, expected_duration) in enumerate(zip(character_outputs, expected, strict=True), start=1):
                 try:
                     validate_export(output, expected_duration_ms=expected_duration)
@@ -794,7 +801,7 @@ class BatchPage(QWidget):
             text = f"Done · {len(finished)} video{'s' if len(finished) != 1 else ''} saved"
             if failed:
                 text += f" · {len(failed)} failed (see list)"
-        self.job.show_finished(text, folder, success=not cancelled)
+        self.job.show_finished(text, folder, success=not cancelled, announce=not cancelled)
         self._persist()
         self._update_actions()
 

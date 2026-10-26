@@ -2,13 +2,26 @@
 
 ## [Unreleased]
 
-## [0.6.4] - 2026-10-26
+## [0.7.0] - 2026-10-26
+
+### Added
+- Follow person finds the person's own part of the picture in every camera shot: the window or split-screen panel they are in, found from its straight edges and colour, with other people and other panels kept out. When there is no panel, such as a full-screen studio shot, the crop stays on them and leaves the rest of the picture to anyone else in it.
+- Frame has four ways to follow a person. Dynamic keeps every shot in whatever shape it has. Landscape only, portrait only and square only keep just the shots where the person is seen in that shape, and say so if there are none.
+- A box tells you when a job on the Video tab, a save or a whole Batch run has finished, with a button to open the folder. Clipivo also flashes in the taskbar if it is in the background.
+- About links to longweekendlabs.app, the GitHub repository and its issues page.
 
 ### Changed
-- Frame has two choices: Whole picture, or Crop to person, which makes a vertical video that follows the person. The landscape and square shapes are gone; if you had picked one, Clipivo now uses Crop to person.
+- Framed output keeps the person at their original size. Every shot sits centred on one canvas, just large enough for the largest view, with black around smaller ones. Nothing is enlarged; Size shrinks everything by the same amount.
+- Re-encoded video is HEVC (H.265) instead of H.264, about a third smaller at the same quality, and it never spends more on the part of the picture it keeps than the source did. A 215 MB AV1 broadcast followed for 12 minutes saved as 80 MB, where the previous version wrote 644 MB.
+- Following a person is about six times faster. Faces are found with the faster detector unless the person is too small for it, and inside one camera shot the person is followed by position, so faces are only recognised after a cut or every few seconds.
+- A camera cut in another panel of a split screen no longer splits the person's footage into many short pieces, and a stretch under a second with its own layout (an animated transition) is left out.
+- The progress bar keeps moving while Clipivo follows a person through a long clip, instead of waiting at one value until the clip is done.
 
 ### Fixed
-- Crop to person no longer falls back to a plain centre crop. Saving clips that were found without it, clips from a video you reopened, clips you marked yourself, or clips whose edges you moved now finds the person in each clip first, so the crop follows them.
+- Saving clips that were found without Follow person, reopened later, marked by hand, or with moved edges now finds the person first. Before, the crop fell back to the middle of the picture, which for landscape was the whole frame.
+- A photo cropped tight around a face is accepted. The detector missed a face that filled the whole picture, so it is now checked again with a border around it. Clipivo says clearly when a photo has no face or more than one.
+- Videos published at 60 fps from a 50 fps broadcast repeat one frame in every six, which plays as a small hitch ten times a second. Clipivo finds that rhythm and drops the repeats when it re-encodes, so the result plays smoothly at the true rate.
+- Static graphics at the bottom of a panel, such as a caption tag, no longer cut the person off above it.
 
 ## [0.6.3] - 2026-10-22
 

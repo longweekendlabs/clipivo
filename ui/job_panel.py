@@ -10,6 +10,7 @@ from typing import Callable
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QObject, QSettings, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -249,8 +251,9 @@ class JobPanel(QWidget):
         for key, label in FRAMINGS.items():
             self.framing.addItem(label, key)
         self.framing.setToolTip(
-            "Crop to person makes a vertical video that follows the person through every shot, such as their "
-            "half of a split screen. Every clip is scaled to the same size, so a stitched video never changes shape."
+            "Follow person crops every shot to the person's own part of the picture, such as their panel of a "
+            "split screen. Dynamic keeps every shot in whatever shape it has; landscape, portrait or square keep "
+            "only the shots where the person is seen in that shape. All shots are centred on one canvas."
         )
         form.addRow("Frame", self.framing)
         self.destination = QComboBox()
@@ -514,6 +517,19 @@ class JobPanel(QWidget):
         if skipped:
             message += f" Skipped {skipped}: no clear face."
         self.who_hint.setText(message)
+        crowded = [item.name for item in results if item.valid and item.warning.startswith("Multiple faces")]
+        if skipped:
+            QMessageBox.warning(
+                self, "No face found",
+                f"Clipivo couldn't find a face in {skipped} of the {len(named_bytes)} photo{'s' if len(named_bytes) != 1 else ''}, "
+                "so they were not added. Use a clear, front-facing photo where the face is not cut off.",
+            )
+        elif crowded:
+            QMessageBox.warning(
+                self, "More than one face",
+                "Some photos show more than one face. Clipivo used the largest face in each, which may be "
+                "someone else. For the best result, add photos that show only this person.",
+            )
 
     def _photos_failed(self, detail: str) -> None:
         self._check_worker = None
@@ -732,7 +748,7 @@ class JobPanel(QWidget):
         self.progress.setValue(max(0, min(100, int(percent))))
         self.status.setText(text)
 
-    def show_finished(self, text: str, output_folder: str = "", *, success: bool = True) -> None:
+    def show_finished(self, text: str, output_folder: str = "", *, success: bool = True, announce: bool = False) -> None:
         self.set_running(False)
         self.progress.setValue(100 if success else 0)
         self.progress.setVisible(success)
@@ -740,6 +756,22 @@ class JobPanel(QWidget):
         self.status.setToolTip(f"Saved to {output_folder}" if output_folder else "")
         self._last_output_folder = output_folder
         self.open_folder_button.setVisible(bool(output_folder))
+        if announce:
+            self._announce(text, output_folder, success)
+
+    def _announce(self, text: str, output_folder: str, success: bool) -> None:
+        """A box to confirm that a job ended, so it is noticed even when Clipivo is in the background."""
+        box = QMessageBox(self.window())
+        box.setWindowTitle("Finished" if success else "Not finished")
+        box.setIcon(QMessageBox.Information if success else QMessageBox.Warning)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.Ok)
+        if output_folder:
+            open_button = box.addButton("Open folder", QMessageBox.ActionRole)
+            open_button.clicked.connect(self._open_output_folder)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.open()
+        QApplication.alert(self.window())
 
     def clear_status(self) -> None:
         self.progress.hide()

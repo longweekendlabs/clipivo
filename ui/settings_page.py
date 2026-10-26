@@ -93,7 +93,7 @@ class SettingsPage(QWidget):
         self.export_encoder = QComboBox()
         self.export_encoder.addItem("Auto · NVIDIA when available", "auto")
         self.export_encoder.addItem("NVIDIA NVENC", "nvenc")
-        self.export_encoder.addItem("CPU · libx264", "cpu")
+        self.export_encoder.addItem("CPU · libx265", "cpu")
         export_value = self.settings.value("export/video_encoder", "auto", str)
         self.export_encoder.setCurrentIndex(max(0, self.export_encoder.findData(export_value)))
         self.export_encoder.setToolTip(
@@ -101,11 +101,11 @@ class SettingsPage(QWidget):
         )
         export_form.addRow("Exact-cut encoder", self.export_encoder)
         export_hint = QLabel(
-            "NVENC accelerates H.264 encoding. AV1 source decoding remains on CPU on GPUs without AV1 decode support."
+            "NVENC accelerates HEVC (H.265) encoding. AV1 source decoding remains on CPU on GPUs without AV1 decode support."
         )
         export_hint.setWordWrap(True)
         export_hint.setStyleSheet(f"color: {PALETTE['muted']};")
-        export_hint.setToolTip("The GTX 1660 Ti can encode H.264 but cannot hardware-decode AV1")
+        export_hint.setToolTip("The GTX 1660 Ti can encode HEVC but cannot hardware-decode AV1")
         export_form.addRow("", export_hint)
         root.addWidget(export)
 

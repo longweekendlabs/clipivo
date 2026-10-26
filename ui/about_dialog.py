@@ -4,7 +4,8 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
-from version import __app_name__, __copyright__, __org_name__, __tagline__, __version__
+from version import __app_name__, __copyright__, __org_name__, __repository__ as REPOSITORY_URL, __tagline__, __version__
+from version import __website__ as WEBSITE_URL
 
 from .styles import PALETTE
 
@@ -62,6 +63,23 @@ class AboutDialog(QDialog):
         notice.setStyleSheet(f"color: {PALETTE['muted']}; font-size: 10px;")
         notice.setToolTip("Face-model licensing notice")
         layout.addWidget(notice)
+
+        link_style = f"color:{PALETTE['accent']}; text-decoration:none"
+        links = QLabel(
+            " · ".join(
+                f"<a href='{url}' style='{link_style}'>{label}</a>"
+                for label, url in (
+                    ("longweekendlabs.app", WEBSITE_URL),
+                    ("GitHub", REPOSITORY_URL),
+                    ("Report an issue", f"{REPOSITORY_URL}/issues"),
+                )
+            )
+        )
+        links.setTextFormat(Qt.RichText)
+        links.setOpenExternalLinks(True)
+        links.setAlignment(Qt.AlignHCenter)
+        links.setToolTip("Opens in your browser")
+        layout.addWidget(links)
 
         org = QLabel(f"Made with <span style='color:{PALETTE['accent']}'>♥</span> by {__org_name__}<br>{__copyright__}")
         org.setTextFormat(Qt.RichText)

@@ -61,14 +61,25 @@ class ManualCoreTests(unittest.TestCase):
 
     def test_exact_frames_reencode_at_high_quality(self) -> None:
         arguments = export_module._video_encoder_arguments("cpu", 1000)
-        self.assertEqual(arguments[arguments.index("-crf") + 1], "16")
+        self.assertEqual(arguments[arguments.index("-c:v") + 1], "libx265")
+        self.assertEqual(arguments[arguments.index("-crf") + 1], "18")
         self.assertEqual(arguments[arguments.index("-maxrate") + 1], "8000k")
-        self.assertEqual(arguments[arguments.index("-profile:v") + 1], "high")
+        self.assertEqual(arguments[arguments.index("-tag:v") + 1], "hvc1")
         compact = export_module._video_encoder_arguments("cpu", 3000)
         self.assertEqual(compact[compact.index("-maxrate") + 1], "12000k")
         nvenc = export_module._video_encoder_arguments("nvenc", 1000)
-        self.assertEqual(nvenc[nvenc.index("-cq") + 1], "19")
+        self.assertEqual(nvenc[nvenc.index("-c:v") + 1], "hevc_nvenc")
+        self.assertEqual(nvenc[nvenc.index("-cq") + 1], "20")
         self.assertEqual(nvenc[nvenc.index("-preset") + 1], "p7")
+
+    def test_a_crop_may_not_spend_more_than_the_source_did_on_its_pixels(self) -> None:
+        shape = export_module.OutputShape(95, 0, "dynamic", (1920, 1080), source_codec="av1", source_kbps=1900)
+        # Her panel is 6% of the picture: about 6% of the source's rate, made up for HEVC.
+        panel = export_module._bitrate_ceiling(shape, "crop=388:324:116:472")
+        self.assertLess(panel, 300)
+        whole = export_module._bitrate_ceiling(export_module.OutputShape(95, 0, "whole", (1920, 1080), source_codec="h264", source_kbps=6000), "")
+        self.assertLess(whole, 6000)
+        self.assertEqual(export_module._bitrate_ceiling(export_module.OutputShape(), "crop=10:10:0:0"), 0)
 
     def test_original_quality_snaps_starts_to_keyframes_and_merges_overlaps(self) -> None:
         snapped = export_module.snap_to_keyframes(
@@ -193,8 +204,8 @@ class ManualCoreTests(unittest.TestCase):
                 target=target,
                 video_encoder="auto",
             )
-        self.assertIn("h264_nvenc", run.call_args_list[0].args[0])
-        self.assertIn("libx264", run.call_args_list[1].args[0])
+        self.assertIn("hevc_nvenc", run.call_args_list[0].args[0])
+        self.assertIn("libx265", run.call_args_list[1].args[0])
 
     def test_filter_chain_matches_avidemux_order_and_speed_semantics(self) -> None:
         filters = [
@@ -298,3 +309,28 @@ class ManualCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepeatedFrameTests(unittest.TestCase):
+    def test_a_steady_repeat_rhythm_is_found_and_dropped(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="clipivo-tests-") as folder:
+            # 50 fps motion published at 60 fps: one frame in every six is shown twice.
+            converted = Path(folder) / "converted.mp4"
+            plain = Path(folder) / "plain.mp4"
+            for target, chain in ((converted, "fps=50,fps=60"), (plain, "fps=60")):
+                subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=60", "-t", "6",
+                        "-vf", chain, "-c:v", "libx264", "-crf", "10", "-pix_fmt", "yuv420p", str(target),
+                    ],
+                    check=True,
+                )
+            clip = ClipRange(0, 6000)
+            self.assertEqual(export_module.detect_repeat_cycle(converted, [clip]), 6)
+            self.assertEqual(export_module.detect_repeat_cycle(plain, [clip]), 0)
+            output, = export_ranges(
+                converted, [clip], Path(folder) / "out", "accurate", False,
+                shape=export_module.OutputShape(95, 0, "whole", (320, 180)),
+            )
+            self.assertEqual(round(probe_video(output).fps), 50)
