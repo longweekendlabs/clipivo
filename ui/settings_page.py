@@ -21,7 +21,7 @@ from core import downloads
 from core.face_engine import FaceEngine
 from version import __app_name__, __org_name__, __tagline__, __version__
 
-from .setup_dialog import DownloadDialog
+from .setup_dialog import DownloadDialog, DownloadItem
 from .styles import PALETTE
 
 
@@ -274,8 +274,11 @@ class SettingsPage(QWidget):
             return
         finally:
             self.gpu_pack_button.setEnabled(True)
-        item = ("ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
-                lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled))
+        item = DownloadItem(
+            "ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
+            lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled),
+            downloads.gpu_dir(), [entry.urls[0] for entry in plan],
+        )
         dialog = DownloadDialog(
             "GPU acceleration", "Clipivo downloads these from PyPI and keeps them in its own folder:", [item], self,
             note="Your NVIDIA driver must support CUDA 13. If it does not, Clipivo keeps using the CPU.",

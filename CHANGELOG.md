@@ -10,6 +10,7 @@ The first build for Windows and macOS, and the first public release. 0.7.1 was t
 - Clipivo for Windows and macOS. Windows gets a per-user installer that never asks for administrator rights and a portable zip; macOS (Apple Silicon, macOS 14 or newer) gets a dmg. Linux gets rpm, deb and a tarball. All of them are built on GitHub from this repository.
 - Face matching uses the graphics card on more machines: DirectML on Windows (NVIDIA, AMD or Intel) and Core ML on macOS. On Linux with an NVIDIA card, Settings offers NVIDIA's CUDA libraries as an optional download of about 1.5 GB, used from the next start.
 - `clipivo --self-test` checks a build without opening a window and reports what it found.
+- The download window shows where each file is saved, the speed and the time left. If a server cannot be reached, it says which one and why that usually happens (a firewall, antivirus, proxy or no internet), and lists the direct links and the folder so the files can be downloaded in a browser instead.
 
 ### Changed
 - The installers carry the app and nothing else. The face models (191 MB) download once on first launch, and on Windows and macOS so does ffmpeg; every file is checked against its published checksum, and copies already on the computer are used instead. The Linux rpm went from 834 MB to 147 MB.

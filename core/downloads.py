@@ -35,7 +35,40 @@ APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
 
 
 class DownloadError(RuntimeError):
-    pass
+    """A download that did not complete. `blocked` is True when the server could not be
+    reached at all, which is usually a firewall, antivirus, proxy or no internet."""
+
+    def __init__(self, message: str, *, blocked: bool = False, url: str = ""):
+        super().__init__(message)
+        self.blocked = blocked
+        self.url = url
+
+
+def explain_failure(exc: BaseException, url: str, label: str) -> DownloadError:
+    """Turn a network error into words a user can act on."""
+    import ssl
+    import urllib.parse
+
+    host = urllib.parse.urlparse(url).hostname or url
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403, 407, 451):
+            return DownloadError(
+                f"{host} refused the download of {label} (HTTP {exc.code}). A proxy or company "
+                "network may be blocking it.", blocked=True, url=url,
+            )
+        return DownloadError(f"{host} answered HTTP {exc.code} for {label}. Try again later.", url=url)
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, ssl.SSLError) or isinstance(exc, ssl.SSLError):
+        return DownloadError(
+            f"The secure connection to {host} failed for {label}. Antivirus software that "
+            "inspects HTTPS, or a company proxy, often causes this.", blocked=True, url=url,
+        )
+    if isinstance(reason, (TimeoutError, OSError)) or isinstance(exc, TimeoutError):
+        return DownloadError(
+            f"Clipivo could not reach {host} to download {label}. Check the internet connection; "
+            "a firewall, antivirus or proxy may be blocking it.", blocked=True, url=url,
+        )
+    return DownloadError(f"Could not download {label} from {host}: {exc}", url=url)
 
 
 def data_dir() -> Path:
@@ -74,6 +107,15 @@ FACE_MODEL_NOTICE = (
     "The face models are InsightFace's buffalo_l pack, provided by InsightFace for "
     "non-commercial research use. Clipivo downloads them from InsightFace's published files."
 )
+
+
+def face_models_manual() -> tuple[list[str], Path]:
+    """Links to download by hand, and the folder to put the files in."""
+    return [item.urls[0] for item in FACE_MODEL_FILES], face_model_dir()
+
+
+def ffmpeg_manual() -> tuple[list[str], Path]:
+    return [package.url for package in FFMPEG_PACKAGES], tools_dir()
 
 
 def face_model_dir() -> Path:
@@ -291,8 +333,10 @@ def _pypi(name: str, version: str | None = None) -> dict:
     try:
         with urllib.request.urlopen(_request(url), timeout=30, context=_ssl_context()) as response:
             return json.load(response)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise DownloadError(f"Could not reach PyPI for {name}: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise explain_failure(exc, url, f"the {name} details") from exc
+    except ValueError as exc:
+        raise DownloadError(f"PyPI sent an unreadable answer for {name}: {exc}") from exc
 
 
 def _wheel_for(release_files: list[dict]) -> dict | None:
@@ -464,7 +508,7 @@ def _fetch(
                     progress(done + received, total, label)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         partial.unlink(missing_ok=True)
-        raise DownloadError(f"Could not download {label}: {exc}") from exc
+        raise explain_failure(exc, url, label) from exc
     except BaseException:
         partial.unlink(missing_ok=True)
         raise

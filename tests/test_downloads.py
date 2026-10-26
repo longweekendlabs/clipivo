@@ -76,6 +76,18 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual((self.root / "tools" / "ffprobe.exe").read_bytes(), b"ffprobe")
         self.assertEqual(sorted(path.name for path in (self.root / "tools").iterdir()), ["ffmpeg.exe", "ffprobe.exe"])
 
+    def test_unreachable_or_refused_servers_are_reported_as_blocked(self) -> None:
+        import urllib.error
+
+        refused = downloads.explain_failure(urllib.error.URLError(ConnectionRefusedError(111, "refused")), "https://huggingface.co/x", "Face models")
+        self.assertTrue(refused.blocked)
+        self.assertIn("huggingface.co", str(refused))
+        self.assertIn("firewall", str(refused))
+        proxy = downloads.explain_failure(urllib.error.HTTPError("https://example.org/x", 403, "Forbidden", {}, None), "https://example.org/x", "ffmpeg")
+        self.assertTrue(proxy.blocked)
+        missing = downloads.explain_failure(urllib.error.HTTPError("https://example.org/x", 404, "Not Found", {}, None), "https://example.org/x", "ffmpeg")
+        self.assertFalse(missing.blocked)
+
     def test_version_pins_for_the_gpu_download(self) -> None:
         self.assertTrue(downloads._compatible("13.4.92", "~=13.0"))
         self.assertFalse(downloads._compatible("12.9.1", "~=13.0"))
