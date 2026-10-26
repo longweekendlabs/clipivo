@@ -114,7 +114,7 @@ class BatchCoreTests(unittest.TestCase):
         (nested / "movie.MKV").write_bytes(b"video")
         (nested / "notes.txt").write_text("ignore")
         self.assertEqual(discover_videos(self.root)[-1].name, "movie.MKV")
-        self.assertEqual(safe_name_component("  Merve Ekinci / Özel  "), "Merve_Ekinci_Özel")
+        self.assertEqual(safe_name_component("  Nova Vale / Özgür  "), "Nova_Vale_Özgür")
 
     def test_one_decode_pass_matches_multiple_characters(self) -> None:
         engine = MultiTargetEngine()
