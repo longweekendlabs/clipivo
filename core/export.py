@@ -681,20 +681,27 @@ def _video_encoder_arguments(
 
 
 def keyframe_at_or_before(source: Path, milliseconds: int) -> int:
-    """Timestamp of the last keyframe at or before `milliseconds`, read from a small window."""
+    """Timestamp of the last keyframe at or before `milliseconds`, read from a small window.
+
+    Packet flags, not decoded frames: ffprobe 4.x leaves a frame's timestamp empty when
+    frames are skipped with -skip_frame, and packets need no decoding at all.
+    """
     window_start = max(0.0, milliseconds / 1000 - 20)
     completed = subprocess.run(
         [
-            tool_path("ffprobe"), "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+            tool_path("ffprobe"), "-v", "error", "-select_streams", "v:0",
             "-read_intervals", f"{window_start:.3f}%{milliseconds / 1000 + 0.05:.3f}",
-            "-show_entries", "frame=pts_time", "-of", "csv=p=0", str(source),
+            "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", str(source),
         ],
         capture_output=True, text=True, timeout=60, check=False,
     )
     best = 0
-    for line in completed.stdout.split():
+    for line in completed.stdout.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 2 or "K" not in parts[1]:
+            continue
         try:
-            value = round(float(line.strip(",")) * 1000)
+            value = round(float(parts[0]) * 1000)
         except ValueError:
             continue
         if value <= milliseconds:

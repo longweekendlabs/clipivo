@@ -2,9 +2,9 @@
 
 ## [Unreleased]
 
-## [0.7.2] - 2026-10-26
+## [0.7.3] - 2026-10-26
 
-The first build for Windows and macOS, and the first public release. 0.7.1 was tagged but never published: its build stopped on a test that waited for a download dialog nobody could answer.
+The first build for Windows and macOS, and the first public release. 0.7.1 and 0.7.2 were tagged but never published: their Linux builds stopped on the problems fixed below.
 
 ### Added
 - Clipivo for Windows and macOS. Windows gets a per-user installer that never asks for administrator rights and a portable zip; macOS (Apple Silicon, macOS 14 or newer) gets a dmg. Linux gets rpm, deb and a tarball. All of them are built on GitHub from this repository.
@@ -20,6 +20,7 @@ The first build for Windows and macOS, and the first public release. 0.7.1 was t
 ### Fixed
 - Clipivo starts without VLC. Frame stepping, scans and saving still work, and it explains how to get VLC for playback.
 - Dialogs such as About and the download window used a light background with light text; they now follow the dark theme.
+- Original quality could start every clip at the beginning of the video with ffmpeg 4.x (Ubuntu 22.04 and similar), whose ffprobe reports no timestamps for skipped frames. Keyframes are now read from packet flags, which every version reports and which needs no decoding.
 
 
 ## [0.7.0] - 2026-10-26

@@ -1,6 +1,6 @@
 """Single source of truth for Clipivo version and LWL branding."""
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 __app_name__ = "Clipivo"
 __org_name__ = "Long Weekend Labs"
 __copyright__ = "© 2026 Long Weekend Labs"
