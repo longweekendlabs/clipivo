@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import unittest
 import zipfile
@@ -66,7 +67,11 @@ class DownloadTests(unittest.TestCase):
             (folder / "w600k_r50.onnx").write_bytes(b"abcd")
             downloads.forget_found()
             self.assertEqual(downloads.find_face_models(), folder)
-            (folder / "w600k_r50.onnx").write_bytes(b"abce")  # right size, wrong content
+            replaced = folder / "w600k_r50.onnx"
+            replaced.write_bytes(b"abce")  # right size, wrong content
+            # A replaced file gets a new modification time; set one, since a fast rewrite can
+            # land in the same filesystem tick and look unchanged.
+            os.utime(replaced, ns=(replaced.stat().st_atime_ns, replaced.stat().st_mtime_ns + 5_000_000_000))
             downloads.forget_found()
             self.assertIsNone(downloads.find_face_models())
         downloads.forget_found()

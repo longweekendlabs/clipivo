@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-## [0.7.4] - 2026-10-26
+## [0.7.5] - 2026-10-26
+
+0.7.4 was tagged but not published: a test of the model check failed on GitHub's build machine, where a file rewritten within the same instant kept its timestamp. The app itself was unaffected; the test now sets the new time.
 
 ### Added
 - Settings has a "What Clipivo uses" section, and the first-launch window shows the same: the face models, ffmpeg, VLC and the face-matching device, each found or not, where it is, which app a shared copy belongs to, its version, and what to do about anything missing. "Look again" searches once more after you install something or copy files in.
