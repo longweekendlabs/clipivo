@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-10-26
+
+### Added
+- Settings is its own window, with a rail of short sections (Face matching, Saving, Shortcuts, What Clipivo uses, About and privacy) instead of one long page.
+- A Device setting for face matching: Automatic, GPU (CUDA on NVIDIA, DirectML on Windows, Core ML on macOS) or CPU, with a line saying where it runs right now.
+- The status bar always shows where face matching runs, GPU or CPU, and opens Face matching when clicked.
+
+### Changed
+- On Linux with an NVIDIA card, the GPU is part of first-launch setup and is offered again before a scan, unless you choose the CPU. 0.7.x had quietly run on the CPU, about ten times slower: a 13-minute video scans in about two minutes on the GPU.
+- When CUDA 12 and cuDNN 9 are already installed, the GPU needs only ONNX Runtime built for them (about 280 MB) instead of 1.5 GB with NVIDIA's libraries. After the download, Clipivo offers to restart so the GPU is used straight away.
+
+
 ## [0.7.6] - 2026-10-26
 
 ### Fixed

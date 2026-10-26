@@ -69,8 +69,20 @@ class DownloadWorker(QThread):
             self.failed.emit(f"{type(exc).__name__}: {exc}", False)
 
 
+def device_choice() -> str:
+    """The face-matching device chosen in Settings: "auto", "gpu" or "cpu"."""
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings()
+    value = settings.value("face/device", "", str)
+    if value not in ("auto", "gpu", "cpu"):
+        value = "auto" if settings.value("face/use_gpu", True, bool) else "cpu"
+    return value
+
+
 def missing_downloads() -> list[DownloadItem]:
-    """What this computer still needs, with where each goes and links for a manual download."""
+    """What this computer still needs, with where each goes and links for a manual download.
+    On Linux with an NVIDIA card, the GPU runtime is part of setup unless the CPU was chosen."""
     needed = []
     if downloads.find_face_models() is None:
         links, folder = downloads.face_models_manual()
@@ -80,6 +92,11 @@ def missing_downloads() -> list[DownloadItem]:
         links, folder = downloads.ffmpeg_manual()
         needed.append(DownloadItem("ffmpeg, for saving clips", downloads.ffmpeg_download_size(),
                                    downloads.download_ffmpeg, folder, links))
+    if device_choice() != "cpu" and downloads.gpu_pack_offered() and not downloads.gpu_pack_installed():
+        name = ("GPU face matching: ONNX Runtime for your installed CUDA" if downloads.system_cuda12()
+                else "GPU face matching: ONNX Runtime and NVIDIA's CUDA libraries")
+        needed.append(DownloadItem(name, downloads.gpu_pack_estimate(), downloads.download_gpu_pack_now,
+                                   downloads.gpu_dir(), ["https://pypi.org/project/onnxruntime-gpu/"]))
     return needed
 
 
@@ -294,7 +311,17 @@ def ffmpeg_status() -> tuple[bool, str]:
     return True, f"{version + ' · ' if version else ''}{source} · {path}"
 
 
+_CARD: list[str] = []
+
+
 def _nvidia_name() -> str:
+    """The NVIDIA card's name, asked once per session."""
+    if not _CARD:
+        _CARD.append(_query_nvidia_name())
+    return _CARD[0]
+
+
+def _query_nvidia_name() -> str:
     executable = shutil.which("nvidia-smi")
     if not executable:
         return ""
@@ -330,8 +357,10 @@ def device_status(engine) -> tuple[bool | None, str]:
     if downloads.gpu_pack_installed():
         return None, "NVIDIA's CUDA libraries are downloaded · restart Clipivo to use the GPU"
     if downloads.gpu_pack_offered():
-        return None, (f"On the CPU · it works, but {card or 'your NVIDIA card'} would make scans and following a "
-                      "person several times faster with NVIDIA's CUDA libraries, a one-time download")
+        what = ("the GPU runtime for the CUDA already installed here" if downloads.system_cuda12()
+                else "the GPU runtime with NVIDIA's CUDA libraries")
+        return None, (f"On the CPU · {card or 'your NVIDIA card'} would make scans about ten times faster with "
+                      f"{what}, a one-time download of {_megabytes(downloads.gpu_pack_estimate())}")
     return True, "On the CPU · this computer has no graphics card Clipivo can use"
 
 
@@ -409,8 +438,8 @@ class ComponentsPanel(QWidget):
         mark, detail = device_status(self.engine)
         self.rows["device"].setText(self._line(mark, "Face matching", detail))
         installed = downloads.gpu_pack_installed()
-        self.gpu_button.setVisible(installed or downloads.gpu_pack_offered())
-        self.gpu_button.setText("Remove CUDA download" if installed else "Use NVIDIA GPU · 1.5 GB")
+        self.gpu_button.setVisible(installed)
+        self.gpu_button.setText("Remove GPU download")
         self.where.setText(f"Clipivo keeps what it downloads in {downloads.data_dir()}. "
                            "A copy already on this computer, from another app, is used instead of downloading again.")
         self.box.refresh()
@@ -419,34 +448,30 @@ class ComponentsPanel(QWidget):
     def _gpu_clicked(self) -> None:
         from PySide6.QtWidgets import QMessageBox
 
-        if downloads.gpu_pack_installed():
-            downloads.remove_gpu_pack()
-            QMessageBox.information(self, "CUDA download removed", "Restart Clipivo to go back to the CPU.")
-            self.refresh()
-            return
-        self.gpu_button.setEnabled(False)
-        self.gpu_button.setText("Looking it up…")
-        QApplication.processEvents()
-        try:
-            plan = downloads.gpu_pack_plan()
-        except downloads.DownloadError as exc:
-            QMessageBox.warning(self, "GPU acceleration", str(exc))
-            return
-        finally:
-            self.gpu_button.setEnabled(True)
-            self.refresh()
-        item = DownloadItem(
-            "ONNX Runtime for CUDA and NVIDIA's CUDA libraries", downloads.gpu_pack_size(plan),
-            lambda progress, cancelled: downloads.download_gpu_pack(plan, progress, cancelled),
-            downloads.gpu_dir(), [entry.urls[0] for entry in plan],
-        )
-        dialog = DownloadDialog(
-            "Use the NVIDIA GPU", "Clipivo downloads these from PyPI and keeps them in its own folder:", [item], self,
-            note="Your NVIDIA driver must support CUDA 13. If it does not, Clipivo keeps using the CPU.",
-        )
-        if dialog.exec():
-            QMessageBox.information(self, "GPU acceleration ready", "Restart Clipivo to use your NVIDIA GPU.")
+        downloads.remove_gpu_pack()
+        QMessageBox.information(self, "GPU download removed", "Restart Clipivo to go back to the CPU.")
         self.refresh()
+
+
+def restart_clipivo() -> None:
+    """Start Clipivo again and close this one, so a new GPU runtime is loaded."""
+    from PySide6.QtCore import QProcess
+
+    arguments = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+    QProcess.startDetached(sys.executable, arguments)
+    QApplication.quit()
+
+
+def device_badge(engine) -> tuple[str, bool, str]:
+    """(short text, on the GPU, full explanation) for the status bar."""
+    mark, detail = device_status(engine)
+    on_gpu = mark is True and detail.startswith("On the GPU")
+    if on_gpu:
+        backend = detail.split("through ", 1)[-1].split(" (", 1)[0].split(" ·", 1)[0]
+        return f"GPU · {backend}", True, detail
+    if "restart" in detail:
+        return "CPU · restart for GPU", False, detail
+    return "CPU", False, detail
 
 
 class SetupDialog(QDialog):
@@ -471,10 +496,26 @@ class SetupDialog(QDialog):
             note.setWordWrap(True)
             note.setStyleSheet(f"color: {PALETTE['muted']}; font-size: 11px;")
             layout.addWidget(note)
-        self.panel.box.finished.connect(lambda ok: self.accept() if ok and not missing_downloads() else None)
+        self.panel.box.finished.connect(self._downloaded)
         later = QPushButton("Later")
         later.clicked.connect(self.reject)
         layout.addWidget(later, 0, Qt.AlignRight)
+
+    def _downloaded(self, ok: bool) -> None:
+        if not ok or missing_downloads():
+            return
+        if downloads.gpu_pack_installed() and "onnxruntime" in sys.modules:
+            from PySide6.QtWidgets import QMessageBox
+
+            box = QMessageBox(QMessageBox.Information, "Restart to use the GPU",
+                              "The GPU runtime is ready. Clipivo uses it after a restart.", QMessageBox.NoButton, self)
+            restart = box.addButton("Restart now", QMessageBox.AcceptRole)
+            box.addButton("Later", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is restart:
+                restart_clipivo()
+                return
+        self.accept()
 
     def reject(self) -> None:
         self.panel.box.stop()

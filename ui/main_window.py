@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressDialog,
+    QPushButton,
     QSlider,
     QSizePolicy,
     QSplitter,
@@ -65,7 +66,7 @@ from .native_dialogs import choose_directory, choose_png_file, choose_save_file,
 from .people_page import PeoplePage
 from .job_panel import JobPanel
 from .right_panel import RightPanel
-from .settings_page import SettingsPage
+from .settings_dialog import SettingsDialog
 from .styles import PALETTE, app_stylesheet
 from .timeline import DetectionTimeline
 from .vlc_player import VlcPlaybackController
@@ -422,6 +423,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_center()
         self._build_status()
+        QTimer.singleShot(0, self._refresh_device_badge)
         self._set_video_controls_enabled(False)
 
     def _build_actions(self) -> None:
@@ -560,16 +562,18 @@ class MainWindow(QMainWindow):
         self.batch_page.set_match_threshold(self.people_page.match_threshold)
         self.pages.addWidget(self.batch_page)
         self.pages.addWidget(self.people_page)
-        self.settings_page = SettingsPage(self.face_engine, playback=self.playback_info)
+        # Settings is its own window, opened from the Settings tab like Filters.
+        self.settings_page = SettingsDialog(self.face_engine, self, playback=self.playback_info)
         self.settings_page.faceSettingsChanged.connect(self._face_settings_changed)
         self.settings_page.exportSettingsChanged.connect(self._export_settings_changed)
         self.settings_page.defaultFolderChanged.connect(self._default_folder_changed)
         self._default_folder_changed(self.settings_page.default_folder())
         self.settings_page.aboutRequested.connect(self._show_about)
+        self.settings_page.deviceChanged.connect(self._refresh_device_badge)
+        self.settings_page.finished.connect(self._filters_dialog_closed)
         use_gpu, detector_size, threshold = self.settings_page.values()
         self._face_settings_changed(use_gpu, detector_size, threshold)
         self._export_settings_changed(self.settings_page.export_encoder_value())
-        self.pages.addWidget(self.settings_page)
         self.setCentralWidget(self.pages)
 
         self._content_tab = 0
@@ -598,7 +602,10 @@ class MainWindow(QMainWindow):
         if index == 1:
             self._open_filters_dialog()
             return
-        stack_index = {0: 0, 2: 1, 3: 2, 4: 3}.get(index)
+        if index == 4:
+            self.open_settings()
+            return
+        stack_index = {0: 0, 2: 1, 3: 2}.get(index)
         if stack_index is None:
             return
         if hasattr(self, "filters_dialog") and self.filters_dialog.isVisible():
@@ -615,6 +622,15 @@ class MainWindow(QMainWindow):
             self.page_tabs.blockSignals(False)
         page_keys = {0: "video_page", 2: "batch_page", 3: "people_page", 4: "settings"}
         self.actions[page_keys[index]].setChecked(True)
+
+    def open_settings(self, page: str = "") -> None:
+        if page:
+            self.settings_page.open_page(page)
+        else:
+            self.settings_page.refresh_engine_status()
+        self.settings_page.show()
+        self.settings_page.raise_()
+        self.settings_page.activateWindow()
 
     def _open_filters_dialog(self) -> None:
         if not hasattr(self, "filters_dialog") or not self.video_info:
@@ -807,9 +823,21 @@ class MainWindow(QMainWindow):
         status.setFixedHeight(24)
         self.status_text = QLabel("  No video loaded    •   ")
         status.addWidget(self.status_text)
+        # Where face matching runs, always visible (as in the concept's status bar).
+        self.device_badge = QPushButton()
+        self.device_badge.setFlat(True)
+        self.device_badge.setCursor(Qt.PointingHandCursor)
+        self.device_badge.clicked.connect(lambda: self.open_settings("face"))
+        status.addWidget(self.device_badge)
+        dot = QLabel("  •   ")
+        status.addWidget(dot)
         self.ready_text = QLabel("Ready")
         self.ready_text.setStyleSheet(f"color: {PALETTE['ready']};")
         status.addWidget(self.ready_text)
+        self._device_timer = QTimer(self)
+        self._device_timer.setInterval(4000)
+        self._device_timer.timeout.connect(self._refresh_device_badge)
+        self._device_timer.start()
         brand = QLabel(f"{__app_name__} v{__version__}  ·  {__org_name__}  ")
         brand.setStyleSheet(f"color: {PALETTE['muted']};")
         brand.setToolTip("Clipivo version and Long Weekend Labs branding")
@@ -1484,6 +1512,23 @@ class MainWindow(QMainWindow):
             factory = getattr(self.face_engine, "wide_shot_engine", None)
             self.wide_face_engine = factory() if callable(factory) else self.face_engine
         return self.wide_face_engine
+
+    def _refresh_device_badge(self) -> None:
+        if not hasattr(self, "device_badge"):
+            return
+        try:
+            from .setup_dialog import device_badge
+
+            text, on_gpu, detail = device_badge(self.face_engine)
+        except Exception as exc:  # noqa: BLE001
+            text, on_gpu, detail = "Device unknown", False, str(exc)
+        colour = PALETTE["ready"] if on_gpu else PALETTE["accent"]
+        self.device_badge.setText(text)
+        self.device_badge.setToolTip(f"Face matching: {detail}. Click for Settings › Face matching.")
+        self.device_badge.setStyleSheet(
+            f"QPushButton {{ color: {colour}; border: none; background: transparent; padding: 0; font-weight: 600; }}"
+            f"QPushButton:hover {{ text-decoration: underline; }}"
+        )
 
     def playback_unavailable_reason(self) -> str:
         return getattr(self.player, "unavailable_reason", "")

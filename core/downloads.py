@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -418,13 +419,60 @@ def activate_gpu_pack() -> bool:
     return True
 
 
-def preload_gpu_libraries() -> None:
-    """Load the CUDA libraries shipped as NVIDIA's pip packages so ONNX Runtime finds them."""
+# The CUDA 12 libraries ONNX Runtime's CUDA build loads, and the last onnxruntime-gpu made for
+# CUDA 12: when the computer already has these, only that one wheel is downloaded.
+_CUDA12_LIBRARIES = ("libcudart.so.12", "libcublas.so.12", "libcublasLt.so.12", "libcufft.so.11",
+                     "libcurand.so.10", "libcudnn.so.9")
+_CUDA12_RUNTIME = "1.26.0"
+_CUDA12_FOLDERS = ("/usr/local/cuda/lib64", "/usr/local/cuda/targets/x86_64-linux/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu")
+
+
+def system_cuda12() -> dict[str, str] | None:
+    """Where an installed CUDA 12 and cuDNN 9 keep the libraries ONNX Runtime needs, or None."""
+    if not sys.platform.startswith("linux"):
+        return None
+    found: dict[str, str] = {}
     try:
+        cache = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=10, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        cache = ""
+    for name in _CUDA12_LIBRARIES:
+        for line in cache.splitlines():
+            if line.strip().startswith(name + " ") and "x86-64" in line:
+                found[name] = line.rsplit("=>", 1)[-1].strip()
+                break
+        else:
+            for folder in _CUDA12_FOLDERS:
+                if (Path(folder) / name).is_file():
+                    found[name] = str(Path(folder) / name)
+                    break
+    return found if len(found) == len(_CUDA12_LIBRARIES) else None
+
+
+def gpu_pack_kind() -> str:
+    """"system-cuda12" when the pack uses the installed CUDA, "bundled" when it carries its own."""
+    try:
+        return json.loads((gpu_dir() / ".complete").read_text(encoding="utf-8")).get("kind", "bundled")
+    except (OSError, ValueError):
+        return "bundled"
+
+
+def preload_gpu_libraries() -> None:
+    """Make the CUDA libraries findable for ONNX Runtime's CUDA build: the installed CUDA 12,
+    loaded by full path, or NVIDIA's pip packages that came with the pack."""
+    if not gpu_pack_installed():
+        return
+    try:
+        if gpu_pack_kind() == "system-cuda12":
+            import ctypes
+
+            for path in (system_cuda12() or {}).values():
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+            return
         import onnxruntime
 
         preload = getattr(onnxruntime, "preload_dlls", None)
-        if callable(preload) and gpu_pack_installed():
+        if callable(preload):
             preload(cuda=True, cudnn=True, msvc=False, directory="")
     except Exception:  # noqa: BLE001 - CPU still works; the GPU simply is not used.
         pass
@@ -507,8 +555,14 @@ def _requirements(info: dict, extras: tuple[str, ...]) -> list[tuple[str, str]]:
 
 
 def gpu_pack_plan() -> list[RemoteFile]:
-    """The wheels to fetch: onnxruntime-gpu matching this build, plus every NVIDIA package it
-    and they need, newest compatible versions, each with PyPI's SHA-256."""
+    """The wheels to fetch, each with PyPI's SHA-256. With CUDA 12 and cuDNN 9 already
+    installed, only onnxruntime-gpu built for CUDA 12 (about 280 MB). Otherwise onnxruntime-gpu
+    matching this build plus every NVIDIA package it needs (about 1.5 GB)."""
+    if system_cuda12():
+        runtime = _pypi("onnxruntime-gpu", _CUDA12_RUNTIME)
+        wheel = _wheel_for(runtime["urls"])
+        if wheel:
+            return [RemoteFile(wheel["filename"], wheel["size"], wheel["digests"]["sha256"], (wheel["url"],))]
     version = _onnxruntime_version()
     runtime = _pypi("onnxruntime-gpu", version)
     wheel = _wheel_for(runtime["urls"])
@@ -550,6 +604,17 @@ def pending_major(pending: list[tuple[str, str]]) -> str:
     return ""
 
 
+def gpu_pack_estimate() -> int:
+    """Roughly what the GPU download will be, without asking PyPI: one onnxruntime-gpu wheel
+    when CUDA 12 is installed, otherwise that plus NVIDIA's CUDA libraries."""
+    return 280_000_000 if system_cuda12() else 1_550_000_000
+
+
+def download_gpu_pack_now(progress: ProgressFn | None = None, cancelled: CancelledFn | None = None) -> Path:
+    """Resolve the exact files on PyPI, then download them."""
+    return download_gpu_pack(gpu_pack_plan(), progress, cancelled)
+
+
 def gpu_pack_size(plan: list[RemoteFile]) -> int:
     return sum(item.size for item in plan)
 
@@ -571,7 +636,8 @@ def download_gpu_pack(plan: list[RemoteFile], progress: ProgressFn | None = None
             done += item.size
         for library in staging.rglob("*.so*"):
             library.chmod(library.stat().st_mode | stat.S_IXUSR)
-        (staging / ".complete").write_text("\n".join(item.name for item in plan), encoding="utf-8")
+        kind = "system-cuda12" if len(plan) == 1 and system_cuda12() else "bundled"
+        (staging / ".complete").write_text(json.dumps({"kind": kind, "files": [item.name for item in plan]}), encoding="utf-8")
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise

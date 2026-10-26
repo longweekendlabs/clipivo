@@ -311,8 +311,8 @@ class ManualUiTests(unittest.TestCase):
             self.assertEqual(window.page_tabs.currentIndex(), 3)
             self.assertFalse(window.filters_dialog.isVisible())
             window.actions["settings"].trigger()
-            self.assertEqual(window.pages.currentIndex(), 3)
-            self.assertEqual(window.page_tabs.currentIndex(), 4)
+            self.assertTrue(window.settings_page.isVisible())  # Settings is its own window
+            window.settings_page.close()
             window.actions["video_page"].trigger()
             self.assertEqual(window.pages.currentIndex(), 0)
             self.assertEqual(window.page_tabs.currentIndex(), 0)
