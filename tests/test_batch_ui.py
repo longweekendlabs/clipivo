@@ -69,7 +69,7 @@ class BatchUiTests(unittest.TestCase):
             self.assertEqual(page.queue.rowCount(), 2)
             self.assertEqual(page.queue.cellWidget(1, 3).text(), "Choose who…")
             self.assertIn("1 without anyone", page.summary.text())
-            with patch("ui.batch_page.QMessageBox.information") as told:
+            with patch("ui.batch_page.QMessageBox.information") as told, patch("ui.batch_page.offer_downloads", return_value=True):
                 page._start()
             self.assertIn("second.mkv", told.call_args.args[2])
             self.assertIsNone(page.worker)

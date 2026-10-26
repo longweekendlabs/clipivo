@@ -363,7 +363,7 @@ class ManualUiTests(unittest.TestCase):
             window.one_time_person.add([("a.png", b"face-a"), ("b.png", b"face-b")])
             self.assertEqual(window.current_target.name, "One-time person")
             window.right_panel.job.set_values({"arrangement": "compilation", "save_next_to_source": True, "mode": "accurate"})
-            with patch("ui.main_window.BatchExecutionWorker") as worker_class:
+            with patch("ui.main_window.BatchExecutionWorker") as worker_class, patch("ui.main_window.offer_downloads", return_value=True):
                 window._start_video_job()
             configuration, targets, _engine = worker_class.call_args.args[:3]
             self.assertEqual([entry.path for entry in configuration.videos], [self.video])

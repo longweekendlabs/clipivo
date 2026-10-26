@@ -7,7 +7,7 @@ from typing import Callable
 
 from PySide6.QtCore import QThread, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
 
 from core import downloads
 
@@ -149,6 +149,9 @@ def offer_downloads(parent) -> bool:
     items = missing_downloads()
     if not items:
         return True
+    if QApplication.platformName() == "offscreen":
+        # Nobody can answer a dialog here (tests, --self-test); report instead of waiting.
+        return False
     dialog = DownloadDialog(
         "Finish setting up Clipivo",
         "Clipivo downloads these once, instead of carrying them in its installer:",
