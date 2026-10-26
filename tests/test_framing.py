@@ -5,7 +5,8 @@ import unittest
 import numpy as np
 
 from core.export import OutputShape, _with_framed_size
-from core.framing import crop_filter, find_static_band, output_size, shot_crop, split_shots
+from core.batch import BatchConfiguration, untracked_clips
+from core.framing import FRAMINGS, crop_filter, find_static_band, normalise_framing, output_size, shot_crop, split_shots
 from core.models import ClipRange
 
 
@@ -21,7 +22,6 @@ class FramingTests(unittest.TestCase):
         self.assertIn("min(ih,1080)", after)
         self.assertFalse(OutputShape(100, 1080, "whole", (1920, 1080)).needs_reencode())
         self.assertEqual(output_size("portrait", 1080), (1080, 1920))
-        self.assertEqual(output_size("square", 720), (720, 720))
 
     def test_each_camera_shot_gets_its_own_crop(self) -> None:
         # Split screen with her on the right half, then a full-screen shot of her.
@@ -65,6 +65,21 @@ class FramingTests(unittest.TestCase):
         (_piece, (before, after)), = shape.pieces(clip)
         self.assertTrue(before.startswith("crop="))
         self.assertIn(f"scale={shape.out_short}:", after)
+
+    def test_old_landscape_and_square_settings_become_crop_to_person(self) -> None:
+        self.assertEqual(list(FRAMINGS), ["whole", "portrait"])
+        for old in ("landscape", "square", "portrait"):
+            self.assertEqual(normalise_framing(old), "portrait")
+        self.assertEqual(normalise_framing("nonsense"), "whole")
+        self.assertEqual(BatchConfiguration.from_dict({"framing": "square"}).framing, "portrait")
+
+    def test_clips_without_tracking_or_with_moved_edges_need_tracking(self) -> None:
+        shots = [{"start": 0, "end": 4000, "points": [face(0, 960)], "band": None}]
+        tracked = ClipRange(0, 4000, shots=shots, frame=[1920, 1080])
+        reopened = ClipRange(0, 4000)
+        extended = ClipRange(0, 6000, shots=shots, frame=[1920, 1080])
+        trimmed = ClipRange(500, 3500, shots=shots, frame=[1920, 1080])
+        self.assertEqual(untracked_clips([tracked, reopened, extended, trimmed]), [reopened, extended])
 
 
 if __name__ == "__main__":

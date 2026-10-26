@@ -16,19 +16,25 @@ from __future__ import annotations
 from statistics import median
 
 MAX_SIZES = {0: "Original size", 1440: "Up to 1440p", 1080: "Up to 1080p", 720: "Up to 720p"}
+# Crop to person is a vertical 9:16 picture. The key stays "portrait" so saved settings and
+# queues keep working; the landscape and square shapes of 0.5-0.6 now mean the same.
 FRAMINGS = {
     "whole": "Whole picture",
-    "landscape": "Follow person · landscape",
-    "portrait": "Follow person · portrait",
-    "square": "Follow person · square",
+    "portrait": "Crop to person",
 }
-_ASPECT = {"landscape": 16 / 9, "portrait": 9 / 16, "square": 1.0}
+_LEGACY_FRAMINGS = {"landscape": "portrait", "square": "portrait"}
+_ASPECT = {"portrait": 9 / 16}
 # Crop height in face heights and where the face centre sits from the top of the crop.
-_HEIGHT_IN_FACES = {"landscape": 2.8, "portrait": 4.2, "square": 3.0}
+_HEIGHT_IN_FACES = {"portrait": 4.2}
 _FACE_LEVEL = 0.38
 _MIN_HEIGHT_IN_FACES = 2.2
 DEFAULT_CROP_SHORT_SIDE = 1080
 PAN_STEP_S = 1.0
+
+
+def normalise_framing(value) -> str:
+    value = _LEGACY_FRAMINGS.get(str(value), str(value))
+    return value if value in FRAMINGS else "whole"
 
 
 def scale_filter(max_short_side: int) -> str:

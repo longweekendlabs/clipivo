@@ -141,7 +141,7 @@ class OutputShape:
     def pieces(self, clip: ClipRange) -> list[tuple[ClipRange, tuple[str, str]]]:
         """Split a clip into exportable pieces with (before, after) user-filter chains.
 
-        Whole picture is one piece. Follow person gives one piece per camera shot, each with
+        Whole picture is one piece. Crop to person gives one piece per camera shot, each with
         its own crop, all scaled to the same output size.
         """
         if self.framing == "whole" or not all(self.frame_size):

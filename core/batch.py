@@ -18,7 +18,7 @@ import av
 
 from .face_engine import FaceEngine
 from .models import ClipRange
-from .framing import FRAMINGS, MAX_SIZES, find_static_band, split_shots
+from .framing import MAX_SIZES, find_static_band, normalise_framing, split_shots
 from .naming import NAMING_SCHEMES
 from .timecode import format_duration
 from .video_probe import probe_video
@@ -143,7 +143,7 @@ class BatchConfiguration:
             custom_name=str(payload.get("custom_name", "")),
             output_quality=max(50, min(100, int(payload.get("output_quality", 100)))),
             max_short_side=int(payload.get("max_short_side", 0)) if int(payload.get("max_short_side", 0)) in MAX_SIZES else 0,
-            framing=str(payload.get("framing", "whole")) if payload.get("framing") in FRAMINGS else "whole",
+            framing=normalise_framing(payload.get("framing", "whole")),
         )
 
 
@@ -524,6 +524,17 @@ def _scan_refinement_window(
 
 TRACK_STEP_MS = 400
 _CUT_DIFFERENCE = 24.0
+
+
+def untracked_clips(ranges: list[ClipRange]) -> list[ClipRange]:
+    """Clips with no person framing data, or whose edges were moved past what was tracked."""
+    def covered(clip: ClipRange) -> bool:
+        shots = clip.shots or []
+        return bool(shots and clip.frame) and (
+            int(shots[0]["start"]) <= clip.start_ms + 120 and int(shots[-1]["end"]) >= clip.end_ms - 120
+        )
+
+    return [clip for clip in ranges if not covered(clip)]
 
 
 def track_person_in_clips(

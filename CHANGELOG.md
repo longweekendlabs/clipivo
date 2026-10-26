@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-26
+
+### Changed
+- Frame has two choices: Whole picture, or Crop to person, which makes a vertical video that follows the person. The landscape and square shapes are gone; if you had picked one, Clipivo now uses Crop to person.
+
+### Fixed
+- Crop to person no longer falls back to a plain centre crop. Saving clips that were found without it, clips from a video you reopened, clips you marked yourself, or clips whose edges you moved now finds the person in each clip first, so the crop follows them.
+
 ## [0.6.3] - 2026-10-22
 
 ### Added

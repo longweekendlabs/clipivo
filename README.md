@@ -34,7 +34,7 @@ A Quality slider runs from 50% to 100%. At 100% the original is copied untouched
 
 Size keeps the original or limits output to 1440p, 1080p or 720p by the shorter side, so a 4K video in 16:9, 4:3 or portrait keeps its shape and nothing is ever enlarged.
 
-Frame can follow the person. Choose landscape, portrait or square and Clipivo tracks them through every clip: each camera shot gets its own crop, the crop pans when they move, and news tickers and banners at the bottom are kept out. A split screen or a reporter beside the news footage becomes a picture of just them, and every shot is scaled to one size, so a stitched video never changes shape.
+Frame can crop to the person. Choose Crop to person and Clipivo makes a vertical video that tracks them through every clip: each camera shot gets its own crop, the crop pans when they move, and news tickers and banners at the bottom are kept out. A split screen or a reporter beside the news footage becomes a picture of just them, and every shot is scaled to one size, so a stitched video never changes shape.
 
 ## Batch: many videos, many people, unattended
 

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from core.batch import OUTPUT_SUBFOLDER, SOURCE_AFTER
 from core.character_store import CharacterStore
 from core.face_engine import FaceEngine
-from core.framing import FRAMINGS, MAX_SIZES
+from core.framing import FRAMINGS, MAX_SIZES, normalise_framing
 from core.naming import DEFAULT_SCHEME, NAMING_SCHEMES, output_base_name
 
 from .native_dialogs import choose_directory, choose_images
@@ -249,8 +249,8 @@ class JobPanel(QWidget):
         for key, label in FRAMINGS.items():
             self.framing.addItem(label, key)
         self.framing.setToolTip(
-            "Follow person crops each clip around where the person is, such as their half of a split screen. "
-            "Every clip is scaled to the same size, so a stitched video never changes shape."
+            "Crop to person makes a vertical video that follows the person through every shot, such as their "
+            "half of a split screen. Every clip is scaled to the same size, so a stitched video never changes shape."
         )
         form.addRow("Frame", self.framing)
         self.destination = QComboBox()
@@ -546,7 +546,7 @@ class JobPanel(QWidget):
         default_quality = 100 if values.get("mode", "copy") == "copy" else 95
         self.quality.setValue(max(10, min(20, int(values.get("output_quality", default_quality)) // 5)))
         self.max_size.setCurrentIndex(max(0, self.max_size.findData(int(values.get("max_short_side", 0) or 0))))
-        self.framing.setCurrentIndex(max(0, self.framing.findData(values.get("framing", "whole"))))
+        self.framing.setCurrentIndex(max(0, self.framing.findData(normalise_framing(values.get("framing", "whole")))))
         self._update_output_hint()
         self._custom_folder = str(values.get("output_dir", "") or "")
         if values.get("save_into_done"):

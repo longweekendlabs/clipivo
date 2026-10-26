@@ -51,7 +51,10 @@ from core.video_probe import ProbeError, probe_video
 
 from .about_dialog import AboutDialog
 from .batch_page import BatchExecutionWorker, BatchPage
-from core.batch import OUTPUT_SUBFOLDER, VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry
+from core.batch import (
+    OUTPUT_SUBFOLDER, VIDEO_SUFFIXES, BatchCharacterTarget, BatchConfiguration, BatchVideoEntry,
+    track_person_in_clips, untracked_clips,
+)
 from core.export import OutputShape, snap_to_keyframes
 from core.naming import output_base_name
 from .icons import line_icon
@@ -101,6 +104,8 @@ class KeyframeWorker(QThread):
 
 class ExportWorker(QThread):
     progressed = Signal(int, int, str)
+    # Framing data found while saving: {clip id: (shots, frame)}, kept so the next save is quick.
+    tracked = Signal(object)
     succeeded = Signal(object)
     failed = Signal(str)
 
@@ -119,10 +124,15 @@ class ExportWorker(QThread):
         parent=None,
         output_name: str | None = None,
         shape: OutputShape | None = None,
+        tracking: BatchCharacterTarget | None = None,
+        face_engine: FaceEngine | None = None,
     ):
         super().__init__(parent)
         self.output_name = output_name
         self.shape = shape
+        # Crop to person needs to know where the person is in clips the scan did not track.
+        self.tracking = tracking
+        self.face_engine = face_engine
         self.source = source
         self.clips = [ClipRange.from_dict(item.to_dict()) for item in clips]
         self.output_dir = output_dir
@@ -141,6 +151,7 @@ class ExportWorker(QThread):
     def run(self) -> None:
         try:
             clips = self.clips
+            self._track_untracked(clips)
             if self.mode == "copy" and not any(item.enabled for item in self.filters) and not (
                 self.shape and self.shape.needs_reencode()
             ):
@@ -166,6 +177,23 @@ class ExportWorker(QThread):
             self.succeeded.emit(outputs)
         except ExportError as exc:
             self.failed.emit(str(exc))
+
+    def _track_untracked(self, clips: list[ClipRange]) -> None:
+        if not self.shape or self.shape.framing == "whole" or not self.tracking or not self.face_engine:
+            return
+        pending = untracked_clips(clips)
+        if not pending:
+            return
+        target = self.tracking
+        self.progressed.emit(0, 1, f"Finding {target.name} in each clip")
+        track_person_in_clips(
+            self.source, self.face_engine, target.id, self.face_engine.reference_matrix(target.references),
+            target.threshold, pending, cancelled=self.cancel_event.is_set,
+            progress=lambda done, total: self.progressed.emit(done, total, f"Finding {target.name} in each clip"),
+        )
+        if self.cancel_event.is_set():
+            raise ExportError("Cancelled.")
+        self.tracked.emit({clip.id: (clip.shots, clip.frame) for clip in pending if clip.frame})
 
 
 class FindCharacterWorker(QThread):
@@ -363,6 +391,7 @@ class MainWindow(QMainWindow):
         self.keyframe_worker: KeyframeWorker | None = None
         self._keyframe_workers: set[KeyframeWorker] = set()
         self.export_worker: ExportWorker | None = None
+        self._export_tracking: BatchCharacterTarget | None = None
         self.export_progress: QProgressDialog | None = None
         self.find_worker: FindCharacterWorker | None = None
         self.find_progress: QProgressDialog | None = None
@@ -1683,6 +1712,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No clips", message)
             return
         values = self.video_job.values()
+        self._export_tracking = None
+        if values["framing"] != "whole" and untracked_clips(clips):
+            self._export_tracking = self._crop_target()
+            if self._export_tracking is None:
+                return
         if values["save_into_done"]:
             output_dir = self.video_info.path.parent / OUTPUT_SUBFOLDER
         elif values["save_next_to_source"]:
@@ -1695,6 +1729,25 @@ class MainWindow(QMainWindow):
                 return
             output_dir = Path(folder)
         self._start_export(output_dir, mode, stitched, include_audio, None)
+
+    def _crop_target(self) -> BatchCharacterTarget | None:
+        """Who Crop to person follows in clips the scan did not track, or None after telling the user why not."""
+        person = self._current_person()
+        if not person:
+            QMessageBox.information(self, "Who should Clipivo crop to?", "Crop to person needs to know who to follow. Pick them in Who first.")
+            return None
+        if not self.face_engine:
+            QMessageBox.critical(self, "Face engine unavailable", "Clipivo's local face engine is not configured.")
+            return None
+        try:
+            references = self.video_job.references_for(person)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Could not load references", str(exc))
+            return None
+        if not references:
+            QMessageBox.information(self, "No photos", f"{person.name} has no photos yet.")
+            return None
+        return BatchCharacterTarget(person.id, person.name, references, self.people_page.match_threshold)
 
     def _request_export_selected_mode(self) -> None:
         self._save_clips()
@@ -1735,13 +1788,22 @@ class MainWindow(QMainWindow):
                 values["framing"],
                 (self.video_info.width, self.video_info.height),
             ),
+            tracking=self._export_tracking,
+            face_engine=self._wide_engine() if self._export_tracking else None,
         )
+        self._export_tracking = None
         self.video_job.set_running(True)
         self._open_job_dialog("Saving clips…")
         self.export_worker.progressed.connect(self._export_progressed)
+        self.export_worker.tracked.connect(self._export_tracked)
         self.export_worker.succeeded.connect(self._export_succeeded)
         self.export_worker.failed.connect(self._export_failed)
         self.export_worker.start()
+
+    def _export_tracked(self, found: dict) -> None:
+        for clip in self.right_panel.ranges():
+            if clip.id in found:
+                clip.shots, clip.frame = found[clip.id]
 
     def _export_progressed(self, done: int, total: int, text: str) -> None:
         self._job_dialog_progress(round(done / max(1, total) * 100), text)

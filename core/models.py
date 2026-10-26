@@ -37,7 +37,7 @@ class ClipRange:
     id: str = field(default_factory=lambda: uuid4().hex)
     # Person framing data from tracking: camera shots with face samples [t_ms, cx, cy, face_h]
     # and the top of any static bottom band, plus the frame size they were measured on.
-    # None for clips marked by hand or scanned without Follow person.
+    # None for clips marked by hand or scanned without Crop to person.
     shots: list[dict] | None = None
     frame: list[int] | None = None
 
